@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (build + test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install WebKit2GTK + Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # cargo fmt / clippy are not enforced yet: the existing tree has
+      # ~33 rustfmt diffs and a handful of clippy lints that predate
+      # this audit. CONTRIBUTING tells contributors to run both
+      # locally; we will flip these to required after a dedicated
+      # style-pass PR so the audit PR stays scoped to behaviour.
+      - run: cargo build --manifest-path src-tauri/Cargo.toml --all-targets
+      - run: cargo test  --manifest-path src-tauri/Cargo.toml
+
+  frontend:
+    name: Frontend (build + audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm audit --audit-level=high
+
+  secret-scan:
+    name: Secret leak guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for known private tokens (best-effort)
+        run: |
+          set -e
+          # `sk-ant-` and `sk-` require ≥20 alphanumerics afterwards so
+          # placeholders like `sk-ant-...` in .env.example don't trip.
+          patterns='sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{35}|ghp_[A-Za-z0-9]{36}|xox[abp]-[A-Za-z0-9-]+|BEGIN RSA PRIVATE KEY|BEGIN OPENSSH PRIVATE KEY'
+          if grep -RInE "$patterns" \
+              --exclude-dir=.git \
+              --exclude-dir=.github \
+              --exclude-dir=node_modules \
+              --exclude-dir=src-tauri/target \
+              --exclude-dir=dist \
+              --exclude-dir=dane \
+              --exclude-dir=sekrety \
+              . ; then
+            echo "::error::Possible secret found in the repo"
+            exit 1
+          fi
+          echo "No secret-shaped strings found."
