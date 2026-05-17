@@ -6,13 +6,13 @@ Built with **Rust + Tauri + Svelte** for maximum performance and minimal footpri
 
 ## Features
 
-- **Multi-format parsing**: PDF, DOCX, DOC, TXT, RTF
+- **Multi-format parsing**: PDF, DOCX, TXT (`.doc` files are accepted but routed through the DOCX parser — pure legacy `.doc` binary support is not implemented; RTF is not supported)
 - **Image extraction with context**: Images are extracted with surrounding text preserved
 - **Document classification**: Automatic detection of document types (umowa, pozew, ustawa, etc.)
 - **Watch folder**: Automatic processing of new documents
 - **SQLite database**: Fast search and organization
 - **Modern UI**: Dark theme, responsive design
-- **Cross-platform**: Linux and Windows support
+- **Linux desktop**: built and distributed for Linux (deb / AppImage); the Tauri toolchain compiles on Windows + macOS but no installers are produced by the default bundle config — adding `nsis` / `dmg` targets to `tauri.conf.json` is welcomed via a PR
 
 ## Installation
 
@@ -23,7 +23,13 @@ Built with **Rust + Tauri + Svelte** for maximum performance and minimal footpri
 sudo apt install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
 ```
 
-#### Windows
+#### Windows (build-from-source only — no shipped installer)
+The Tauri toolchain compiles on Windows but `tauri.conf.json` only
+defines Linux bundle targets, so `npm run tauri build` produces a
+debug executable rather than a packaged installer. To get an `.msi`
+or `.exe`, add `nsis` / `msi` to `bundle.targets` in a fork.
+Prerequisites if you want to try:
+
 - Install [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)
 - Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
 
@@ -56,17 +62,26 @@ npm run tauri dev
 
 ### Output Structure
 
-Each processed document creates:
+Processed documents land under the app's data directory:
+
 ```
-processed/<document-id>/
-├── document.md        # Human-readable markdown
-├── document.json      # Structured data for AI
-├── images/
-│   ├── img_001.png   # Extracted images
-│   ├── img_001.json  # Image metadata + context
-│   └── thumb_001.png # Thumbnails
-└── original.pdf      # Original file copy
+<project-root>/dane/
+├── documents.db                       # SQLite index of every processed file
+└── przetworzone/<document-id>/        # one folder per document
+    ├── document.md                    # Human-readable markdown
+    ├── document.json                  # Structured data for AI
+    ├── images/
+    │   ├── img_001.png                # Extracted images
+    │   ├── img_001.json               # Image metadata + context
+    │   └── thumb_001.png              # Thumbnails
+    └── original.<ext>                 # Original file copy
 ```
+
+`<project-root>` is the directory the launcher selects on startup (the
+working directory under development; `/opt/document-processor` on a
+packaged install). `dane/` and `przetworzone/` are Polish legacy
+identifiers (Polish for "data" and "processed") — see CONTRIBUTING for
+the rename policy.
 
 ### Image Context
 
@@ -77,21 +92,23 @@ Each image includes:
 - `ocr_text`: Text extracted from image (if applicable)
 - `ai_description`: AI-generated description (when available)
 
-## Claude Code Skills
+## Integrations
 
-This project includes Claude Code skills for command-line integration:
+### Claude Code skills (external)
 
-### /parse
-```
-/parse ~/Documents/contract.pdf
-```
-Parses a document and extracts text + images.
+Two companion Claude Code skills live outside this repo and call the
+processor over the command line. They are **not** bundled here — install
+them separately in your Claude Code configuration:
 
-### /document-upload-analyzer
-```
-/document-upload-analyzer
-```
-Analyzes document upload methods in a web application.
+- `/parse` — parses a document and extracts text + images.
+  ```
+  /parse ~/Documents/contract.pdf
+  ```
+- `/document-upload-analyzer` — analyses document upload methods in a
+  web application.
+  ```
+  /document-upload-analyzer
+  ```
 
 ## Architecture
 

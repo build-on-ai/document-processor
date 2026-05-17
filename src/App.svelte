@@ -76,7 +76,7 @@
         multiple: true,
         filters: [{
           name: 'Documents',
-          extensions: ['pdf', 'docx', 'doc', 'txt', 'rtf']
+          extensions: ['pdf', 'docx', 'doc', 'txt']
         }]
       });
 
