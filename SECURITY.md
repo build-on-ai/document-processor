@@ -15,7 +15,7 @@ app does not upload parsed content anywhere by default.
 
 | Zone | Trust | Notes |
 |---|---|---|
-| Input files (PDF/DOCX/TXT/RTF) | **Untrusted** | Any user-supplied file is parsed. Parser bugs can crash or, in the worst case, let an attacker exploit memory corruption in `pdf-extract` / `lopdf` / `image` crates. We rely on the Rust ecosystem and Tauri's sandbox for containment. |
+| Input files (PDF/DOCX/TXT; .doc routed through DOCX parser) | **Untrusted** | Any user-supplied file is parsed. Parser bugs can crash or, in the worst case, let an attacker exploit memory corruption in `pdf-extract` / `lopdf` / `image` crates. We rely on the Rust ecosystem and Tauri's sandbox for containment. |
 | Local filesystem | Trusted within the paths the user opens | Tauri's `fs` plugin scopes access. The app does not walk the filesystem beyond what the user selects or the configured watch folder. |
 | Network | None by default | No telemetry, no analytics, no automatic updates. If you add a plugin that phones home, that is explicitly your addition. |
 | SQLite database | Trusted | Stored on the user's disk under the app's config dir. Treat it as personal data. |
@@ -34,6 +34,21 @@ affects this app.
 processing files from untrusted sources. Tauri's own webview
 sandbox does not protect the Rust backend from memory corruption
 in native parsers.
+
+### Webview CSP is a baseline, not a lockdown
+
+`src-tauri/tauri.conf.json` sets a baseline `default-src 'self'`
+CSP that also allows Tauri's `ipc:` / `http://ipc.localhost` and
+`asset:` / `http://asset.localhost` schemes (the Tauri 2 IPC and
+asset protocols), `data:` URIs for images (icons + extracted
+thumbnails), and `'unsafe-inline'` for stylesheets because Svelte
+5 still emits some inline styles at runtime. This is a noticeable
+improvement over the previous `csp: null` (no policy at all) but
+**not** a hardened lockdown — `'unsafe-inline'` in `style-src`
+leaves CSS-injection avenues if a future change ever lets
+untrusted text reach a style context. If you tighten this in your
+fork, remove `'unsafe-inline'` and verify the UI renders correctly
+in `tauri build --release`.
 
 ### Watch folder opens a TOCTOU window
 
