@@ -394,9 +394,15 @@
         <h3>Recent Documents ({processedDocuments.length})</h3>
         <ul class="doc-list">
           {#each processedDocuments as doc}
-            <li onclick={() => viewDocument(doc)} class:active={currentDoc?.id === doc.id}>
-              <span class="doc-name">{doc.filename}</span>
-              <span class="badge {getDocTypeColor(doc.doc_type)}">{doc.doc_type || 'unknown'}</span>
+            <li class:active={currentDoc?.id === doc.id}>
+              <button
+                type="button"
+                class="doc-row"
+                onclick={() => viewDocument(doc)}
+              >
+                <span class="doc-name">{doc.filename}</span>
+                <span class="badge {getDocTypeColor(doc.doc_type)}">{doc.doc_type || 'unknown'}</span>
+              </button>
             </li>
           {/each}
           {#if processedDocuments.length === 0}
@@ -543,16 +549,29 @@
   </div>
 
   {#if showDeleteConfirm}
-    <div class="modal-overlay" onclick={() => showDeleteConfirm = false}>
-      <div class="modal" onclick={(e) => e.stopPropagation()}>
-        <h3>⚠️ Potwierdzenie usunięcia</h3>
+    <div
+      class="modal-overlay"
+      role="presentation"
+      onclick={() => showDeleteConfirm = false}
+      onkeydown={(e) => { if (e.key === 'Escape') showDeleteConfirm = false; }}
+    >
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-modal-title"
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.stopPropagation()}
+      >
+        <h3 id="delete-modal-title">⚠️ Potwierdzenie usunięcia</h3>
         <p>Czy na pewno chcesz usunąć <strong>wszystkie dokumenty</strong> z bazy danych?</p>
         <p class="warning-text">Ta operacja jest nieodwracalna!</p>
         <div class="modal-actions">
-          <button class="secondary" onclick={() => showDeleteConfirm = false}>
+          <button type="button" class="secondary" onclick={() => showDeleteConfirm = false}>
             Anuluj
           </button>
-          <button class="danger" onclick={deleteAllDocuments}>
+          <button type="button" class="danger" onclick={deleteAllDocuments}>
             🗑️ Usuń wszystkie
           </button>
         </div>
