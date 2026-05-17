@@ -1,102 +1,111 @@
 # Contributing to document-processor
 
-Thanks for your interest in contributing! This document explains how to get involved.
+Thanks for your interest! This document covers the parts of contributing that are specific to **document-processor** (Rust + Tauri 2 + Svelte 5). For the legal side see [`CLA.md`](CLA.md); for the security posture see [`SECURITY.md`](SECURITY.md).
 
-## Quick Start
+## Quick start
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feat/my-feature`)
-3. Make your changes
-4. Test locally (`./run.sh agent` and verify)
-5. Open a Pull Request
-6. Sign the CLA (one click via [CLA Assistant bot](https://cla-assistant.io/))
+```bash
+# System deps (Ubuntu/Debian — see README for Windows)
+sudo apt install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+
+# Rust toolchain (any 1.70+ works; CI pins to stable)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Frontend deps
+npm ci
+
+# Dev loop (Tauri shell + Svelte HMR)
+npm run tauri dev
+
+# Or via the launcher
+./run.sh dev
+```
+
+`./run.sh install-deps` runs the apt + npm install in one go.
 
 ## Contributor License Agreement (CLA)
 
-Before your Pull Request can be merged, you must sign the [document-processor CLA](CLA.md).
+Before your PR can be merged, you must sign the [document-processor CLA](CLA.md). The [CLA Assistant bot](https://cla-assistant.io/) will prompt you on your first PR — one click, one time, all your future contributions to this repo are covered.
 
-The CLA Assistant bot will automatically prompt you on your first PR. Signing is a one-time action — all your future contributions are covered.
+**Why a CLA?** document-processor is dual-licensed (AGPLv3 + commercial). To offer commercial licenses, the project must hold the rights to all contributed code. The CLA does **not** transfer ownership of your code — you retain copyright; you simply grant the maintainer the right to license the project (including your contributions) under multiple licenses.
 
-**Why a CLA?** document-processor is dual-licensed (AGPLv3 + commercial). To offer commercial licenses to organizations that need them, the project must hold the rights to all contributed code. Without a CLA, a single contributor could block commercial licensing of the entire project.
+## Repo layout
 
-The CLA does **not** transfer ownership of your code to anyone. You retain copyright. You simply grant the Maintainer the right to license the project (including your contributions) under multiple licenses.
-
-This is the same model used by Apache Software Foundation, Google, MongoDB, Grafana Labs, and most dual-licensed open source projects.
-
-## What to Contribute
-
-We welcome:
-
-- **Bug fixes** — open an issue first if it's a non-trivial change
-- **Plugins** — extend document-processor with new tools and modes (see [Plugin API in README](README.md#plugins))
-- **Documentation** — clarifications, examples, translations
-- **Tests** — improve coverage of `agent.py`, `policy.py`, etc.
-- **Performance improvements** — benchmarks welcome
-- **Model compatibility** — testing with new Ollama models
-
-We're cautious about:
-
-- **Major architectural changes** — discuss in an issue first
-- **Adding heavy dependencies** — document-processor aims to stay lean
-- **Breaking changes to plugin API** — open RFC issue first
-
-## Code Style
-
-- **Python**: PEP 8, 4-space indent, type hints where helpful
-- **Naming**: snake_case for functions/variables, PascalCase for classes
-- **Comments**: explain *why*, not *what*. Code should be self-documenting
-- **No emojis in code** unless functional (e.g. spinner frames)
-- **Polish-language comments are welcome** in core files but please use English in plugin examples to keep them accessible
-
-## Plugin Contributions
-
-Plugins live in `plugins/` and are loaded dynamically. Guidelines:
-
-- One plugin per file, named descriptively (e.g. `plugins/web_search.py`)
-- Define `PLUGIN_NAME`, `PLUGIN_DESCRIPTION`, `PLUGIN_TOOLS`, `execute_tool()`
-- Document any external dependencies in the plugin's docstring
-- Avoid network calls without timeout
-- Respect the Policy Engine — don't bypass it
-
-See README.md for the full Plugin API.
-
-## Testing
-
-Before submitting:
-
-```bash
-# Syntax check
-python3 -m py_compile agent.py web.py worker.py policy.py recovery.py compactor.py
-
-# Smoke test
-./run.sh agent
-> /status
-> /exit
-
-# If your change touches tools, test execution
-> /policy
-> say hello
+```
+src/                — Svelte 5 frontend (App.svelte, app.css, main.js)
+src-tauri/          — Rust backend
+  src/main.rs       — Tauri commands + AppState wiring
+  src/parser.rs     — PDF/DOCX/TXT parsing + image context extraction
+  src/db.rs         — SQLite persistence (rusqlite, bundled)
+  src/watcher.rs    — Filesystem watcher for the watch-folder feature
+  tauri.conf.json   — Window/bundle/CSP config
+  Cargo.toml        — Rust deps (pinned)
+  Cargo.lock        — tracked (desktop app, deterministic builds)
+package.json        — Vite + Svelte + @tauri-apps/* deps
+vite.config.js      — port 1420 dev server (Tauri expects 1420)
+run.sh / uruchom.sh — launchers (English / Polish wrappers)
+.env.example        — env vars the launcher / Tauri honour
 ```
 
-For non-trivial changes, please describe your testing in the PR description.
+## What to contribute
 
-## Reporting Bugs / Security Issues
+Welcomed:
 
-- **Bugs**: Open an issue with reproduction steps, environment (OS, Python version, Ollama version, model), and expected vs. actual behavior.
-- **Security vulnerabilities**: Do **not** open a public issue. Contact the maintainer privately via [github.com/build-on-ai](https://github.com/build-on-ai) with details. We aim to respond within 7 days.
+- **Parsers for new formats** — propose in an issue first so we can pick the right crate (DOC/RTF/ODT all have several options with different tradeoffs).
+- **Image-context improvements** — better OCR, smarter neighbour-text capture.
+- **Watch-folder behaviour** — debouncing, batching, recursion controls.
+- **UI fixes** — accessibility, keyboard navigation, dark/light theming.
+- **Tests** — Rust unit tests in `src-tauri/src/parser.rs` (see the existing test module), or end-to-end harnesses driving Tauri commands.
 
-## Pull Request Checklist
+Cautious about:
 
-- [ ] CLA signed (CLA Assistant bot will check automatically)
-- [ ] Branch from `main`, rebased on latest `main`
-- [ ] Code follows existing style
-- [ ] Manually tested
+- **New heavy dependencies** — every Rust crate is a supply-chain attack surface; every npm dep ships with `npm audit` baggage. Justify in the issue.
+- **Filesystem walking outside the user's selection or watch folder** — SECURITY.md is explicit that the app does not roam the disk.
+- **CSP relaxation** — `tauri.conf.json` controls the renderer's CSP. Tightening is welcome; loosening needs a strong reason in the PR description.
+
+## Local checks before opening a PR
+
+```bash
+# Rust: compile + lint + test
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+cargo test  --manifest-path src-tauri/Cargo.toml
+
+# Frontend: type/syntax + production build
+npm ci
+npm run build
+
+# Dependency audits
+npm audit --audit-level=high
+cargo audit            # cargo install cargo-audit once
+```
+
+CI (`.github/workflows/ci.yml`) runs the same set — keep them green locally to avoid round-trips.
+
+## Style
+
+- **Rust:** rustfmt defaults, clippy clean at `--deny warnings`. Comments explain *why*; code explains *what*.
+- **Svelte / JS:** match the Svelte 5 runes (`$state`, `$derived`) already in `src/App.svelte`. No new global state stores without an issue.
+- **No private data in commits** — no real document samples, no machine paths under `/home/$user/`, no API tokens. `.gitignore` already excludes `dane/`, `sekrety/`, `node_modules/`, `src-tauri/target/`.
+
+## Polish ↔ English
+
+This repo predates the open-sourcing and carries a few Polish identifiers (`uruchom.sh`, the `dane/` and `przetworzone/` directories created by `main.rs` / `parser.rs`). New contributions should be English-first; if you rename one of the legacy Polish identifiers, do it as a standalone refactor PR (not bundled with a feature change) so the diff is easy to review.
+
+## Reporting bugs / security issues
+
+- **Bugs:** open an issue with a reproducer (input file format + size, OS, Rust version, the line from the app's stdout/stderr that mentions the failure).
+- **Security:** do **not** open a public issue. Email the maintainer via [github.com/build-on-ai](https://github.com/build-on-ai). We aim to respond within 7 days. SECURITY.md lists the kinds of issues that take priority.
+
+## PR checklist
+
+- [ ] CLA signed (CLA Assistant will check automatically)
+- [ ] Branch from `main`, rebased on the latest `main`
+- [ ] `cargo fmt --check` / `cargo clippy -- -D warnings` / `cargo test` all pass
+- [ ] `npm run build` succeeds with no new warnings
+- [ ] `npm audit --audit-level=high` clean (or the new advisory has a written rationale in the PR description)
 - [ ] PR description explains *what* and *why*
-- [ ] No private data (IPs, API keys, internal paths) in commits
-
-## Code of Conduct
-
-Be respectful. Disagreements happen — keep them about code, not people. Maintainer reserves the right to lock or close PRs/issues that violate this principle.
+- [ ] No private data in commits
 
 ## License
 
