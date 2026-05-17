@@ -34,6 +34,18 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # Tauri's build script reads frontendDist=../dist (src-tauri/
+      # tauri.conf.json:10) and refuses to compile without it.
+      # `npm run build` is also the beforeBuildCommand the bundler
+      # would run for a packaged release, so we run it here directly
+      # — the frontend job runs in parallel and a separate cache.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build
+
       # cargo fmt / clippy are not enforced yet: the existing tree has
       # ~33 rustfmt diffs and a handful of clippy lints that predate
       # this audit. CONTRIBUTING tells contributors to run both
