@@ -22,8 +22,10 @@ jobs:
         uses: contributor-assistant/github-action@v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # PERSONAL_ACCESS_TOKEN required when storing signatures in another repository
-          # PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          # Cross-repo signature store lives at build-on-ai/cla-signatures.
+          # The org secret CLA_ASSISTANT_LITE_PAT is shared with this repo
+          # (visibility: SELECTED) so the bot can write the signature there.
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_ASSISTANT_LITE_PAT }}
         with:
           path-to-signatures: 'document-processor/cla.json'
           path-to-document: 'https://github.com/build-on-ai/document-processor/blob/main/CLA.md'
