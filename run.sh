@@ -55,10 +55,14 @@ case "${1:-dev}" in
         npm install
         echo "Dependencies installed!"
         ;;
+    preflight)
+        exec "$(dirname "$0")/bin/preflight"
+        ;;
     *)
-        echo "Usage: ./run.sh [dev|build|install-deps]"
+        echo "Usage: ./run.sh [dev|build|install-deps|preflight]"
         echo "  dev          - Run in development mode (default)"
         echo "  build        - Build release version"
         echo "  install-deps - Install system and npm dependencies"
+        echo "  preflight    - Check the host has everything to build (read-only)"
         ;;
 esac

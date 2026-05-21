@@ -23,6 +23,17 @@ Built with **Rust + Tauri + Svelte** for maximum performance and minimal footpri
 sudo apt install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
 ```
 
+Verify the host before building — `bin/preflight` checks Node, Rust and
+every Tauri system library, reports the complete list of what is missing
+with a `fix:` line for each, and changes nothing:
+
+```bash
+bin/preflight        # exit 0 = safe to build, exit 1 = something missing
+```
+
+On newer Ubuntu `libappindicator3-dev` may be packaged as
+`libayatana-appindicator3-dev`; preflight accepts either.
+
 #### Windows (build-from-source only — no shipped installer)
 The Tauri toolchain compiles on Windows but `tauri.conf.json` only
 defines Linux bundle targets, so `npm run tauri build` produces a
