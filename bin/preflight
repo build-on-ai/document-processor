@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# preflight — check that the host can build and run Document Processor
+# before `./run.sh dev` / `./run.sh build`.
+#
+# Usage:  bin/preflight
+#
+# Exit 0  — all checks passed, safe to build. May still print WARN lines
+#           for non-blocking issues.
+# Exit 1  — something the Tauri build needs is missing; the script prints
+#           exactly what and how to fix it, then stops.
+#
+# This script only reads. It installs nothing and changes no state.
+# You run it, you read what it says, you decide.
+
+set -u
+
+RED=$'\033[0;31m'
+YEL=$'\033[0;33m'
+GRN=$'\033[0;32m'
+RST=$'\033[0m'
+
+WARN_COUNT=0
+FAILED=0
+
+ok()   { printf '%s  OK%s     %s\n'  "$GRN" "$RST" "$1"; }
+warn() { printf '%s  WARN%s   %s\n'  "$YEL" "$RST" "$1"; WARN_COUNT=$((WARN_COUNT + 1)); }
+fail() { printf '%s  FAIL%s   %s\n'  "$RED" "$RST" "$1"; FAILED=1; }
+fix()  { printf '         %sfix:%s %s\n' "$YEL" "$RST" "$1"; }
+
+echo 'document-processor preflight'
+echo '----------------------------'
+
+# --- only Linux is a supported build target ------------------------
+if [ "$(uname -s)" != "Linux" ]; then
+  warn "host is $(uname -s) — Tauri compiles here but tauri.conf.json"
+  warn "only defines Linux bundle targets (see README)"
+fi
+
+# --- Node.js + npm -------------------------------------------------
+if command -v node >/dev/null 2>&1; then
+  ok "node present ($(node --version))"
+else
+  fail "node not installed"
+  fix "install Node.js 18+ : https://nodejs.org/  (or: sudo apt install nodejs npm)"
+fi
+
+if command -v npm >/dev/null 2>&1; then
+  ok "npm present ($(npm --version))"
+else
+  fail "npm not installed"
+  fix "ships with Node.js — install Node.js, or: sudo apt install npm"
+fi
+
+# --- Rust toolchain ------------------------------------------------
+if command -v cargo >/dev/null 2>&1; then
+  ok "cargo present ($(cargo --version | awk '{print $2}'))"
+else
+  fail "cargo / Rust toolchain not installed"
+  fix "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+  fix "then: source \"\$HOME/.cargo/env\""
+fi
+
+# --- Tauri Linux system libraries ----------------------------------
+# Each entry: "label|pkg-config name(s)|apt package"
+# Multiple pkg-config names (space-separated) = any one satisfies it.
+check_pc() {
+  local label="$1" names="$2" apt="$3" n
+  for n in $names; do
+    if pkg-config --exists "$n" 2>/dev/null; then
+      ok "$label ($n)"
+      return
+    fi
+  done
+  fail "$label not found"
+  fix "sudo apt install -y $apt"
+}
+
+if command -v pkg-config >/dev/null 2>&1; then
+  check_pc "WebKit2GTK 4.1"  "webkit2gtk-4.1"                              "libwebkit2gtk-4.1-dev"
+  check_pc "libappindicator" "ayatana-appindicator3-0.1 appindicator3-0.1" "libayatana-appindicator3-dev (or libappindicator3-dev)"
+  check_pc "librsvg2"        "librsvg-2.0"                                 "librsvg2-dev"
+  check_pc "OpenSSL"         "openssl"                                     "libssl-dev"
+else
+  fail "pkg-config not installed — cannot verify Tauri system libraries"
+  fix "sudo apt install -y pkg-config"
+fi
+
+# --- patchelf (Tauri uses it when bundling AppImage) ---------------
+if command -v patchelf >/dev/null 2>&1; then
+  ok "patchelf present"
+else
+  fail "patchelf not installed"
+  fix "sudo apt install -y patchelf"
+fi
+
+# --- npm dependencies installed? -----------------------------------
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -d "$REPO_ROOT/node_modules" ]; then
+  ok "node_modules present"
+else
+  warn "node_modules missing — run 'npm install' (run.sh does this for you)"
+fi
+
+# --- verdict -------------------------------------------------------
+echo '----------------------------'
+if [ "$FAILED" -ne 0 ]; then
+  printf '%spreflight FAILED%s — fix the items above, then run bin/preflight again.\n' "$RED" "$RST"
+  printf 'Shortcut for the system libraries:  ./run.sh install-deps\n'
+  exit 1
+fi
+if [ "$WARN_COUNT" -ne 0 ]; then
+  printf '%spreflight passed with %d warning(s)%s — safe to build.\n' "$YEL" "$WARN_COUNT" "$RST"
+else
+  printf '%spreflight passed%s — safe to run ./run.sh dev / build.\n' "$GRN" "$RST"
+fi
+exit 0
