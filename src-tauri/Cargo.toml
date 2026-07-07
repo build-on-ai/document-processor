@@ -45,6 +45,10 @@ zip = "2"
 # Encoding detection
 encoding_rs = "0.8"
 
+# HTTP client for the local Ollama embeddings endpoint (search.rs).
+# default-features off: we only ever call http://localhost, no TLS backend needed.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
 [dev-dependencies]
 tempfile = "3"
 

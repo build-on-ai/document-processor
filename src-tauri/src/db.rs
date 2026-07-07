@@ -62,6 +62,31 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_documents_processed_at ON documents(processed_at DESC);
             CREATE INDEX IF NOT EXISTS idx_documents_doc_type ON documents(doc_type);
             CREATE INDEX IF NOT EXISTS idx_images_document_id ON images(document_id);
+
+            -- Search: chunks are exact substrings of documents.full_text
+            -- (start_offset/end_offset index into it), so a hit can be
+            -- highlighted and scrolled-to in place, not just linked by id.
+            CREATE TABLE IF NOT EXISTS chunks (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                start_offset INTEGER NOT NULL,
+                end_offset INTEGER NOT NULL,
+                embedding BLOB,
+                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
+
+            -- Standalone FTS5 table (not content='chunks'): rows are
+            -- managed explicitly in Rust alongside `chunks` writes
+            -- (replace_chunks below), not via SQL triggers. chunk_id is
+            -- UNINDEXED — stored for the join back to `chunks`, excluded
+            -- from the text index itself.
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                chunk_id UNINDEXED,
+                text
+            );
             "#,
         )?;
 
@@ -316,6 +341,10 @@ impl Database {
     }
 
     pub fn delete_all_documents(&self) -> Result<usize> {
+        // chunks_fts is a virtual table — ON DELETE CASCADE on chunks
+        // doesn't reach it, so it's cleared explicitly.
+        self.conn.execute("DELETE FROM chunks_fts", [])?;
+        self.conn.execute("DELETE FROM chunks", [])?;
         // First delete all images
         self.conn.execute("DELETE FROM images", [])?;
         // Then delete all documents
@@ -330,6 +359,191 @@ impl Database {
         )?;
         Ok(())
     }
+
+    /// Replace `document_id`'s indexed chunks wholesale — same
+    /// reprocess-safety reasoning as images in `save_document`: without
+    /// clearing first, a document reprocessed N times would accumulate
+    /// N generations of chunk/FTS rows under the same document_id.
+    /// `embedding` is `None` when the caller couldn't reach Ollama for
+    /// that chunk — the row is still stored (lexical search still finds
+    /// it), just invisible to the semantic half until a later reindex.
+    pub fn replace_chunks(
+        &self,
+        document_id: &str,
+        chunks: &[crate::search::IndexedChunk],
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+
+        let old_chunk_ids: Vec<String> = tx
+            .prepare("SELECT id FROM chunks WHERE document_id = ?1")?
+            .query_map(params![document_id], |r| r.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        for old_id in &old_chunk_ids {
+            tx.execute("DELETE FROM chunks_fts WHERE chunk_id = ?1", params![old_id])?;
+        }
+        tx.execute("DELETE FROM chunks WHERE document_id = ?1", params![document_id])?;
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            let chunk_id = uuid::Uuid::new_v4().to_string();
+            let embedding_bytes = chunk.embedding.as_deref().map(crate::search::embedding_to_bytes);
+            tx.execute(
+                r#"INSERT INTO chunks
+                   (id, document_id, chunk_index, text, start_offset, end_offset, embedding)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+                params![chunk_id, document_id, i as i64, chunk.text, chunk.start, chunk.end, embedding_bytes],
+            )?;
+            tx.execute(
+                "INSERT INTO chunks_fts (chunk_id, text) VALUES (?1, ?2)",
+                params![chunk_id, chunk.text],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Lexical half: FTS5 MATCH ranked by bm25(), each hit's exact chunk
+    /// text pre-highlighted via FTS5's own `highlight()`.
+    fn search_lexical_ranked(&self, fts_query: &str, limit: usize) -> Result<Vec<(String, String)>> {
+        // Highlight markers are bound params, not inlined into the SQL
+        // text: a raw Rust string (r#"..."#) does not interpret \x01 as
+        // an escape at all — it would pass the four literal characters
+        // \, x, 0, 1 through to SQLite. "\u{1}"/"\u{2}" in a normal
+        // string literal are real control-character bytes.
+        let mut stmt = self.conn.prepare(
+            "SELECT chunk_id, highlight(chunks_fts, 1, ?1, ?2)
+             FROM chunks_fts WHERE chunks_fts MATCH ?3
+             ORDER BY bm25(chunks_fts) LIMIT ?4",
+        )?;
+        let rows = stmt
+            .query_map(params!["\u{1}", "\u{2}", fts_query, limit as i64], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    /// Semantic half: cosine similarity against every embedded chunk.
+    /// Linear scan — see search.rs's module doc for why that's fine at
+    /// this app's scale instead of a vector index.
+    fn search_semantic_ranked(&self, query_embedding: &[f32], limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL")?;
+        let mut scored: Vec<(String, f32)> = stmt
+            .query_map([], |r| {
+                let id: String = r.get(0)?;
+                let bytes: Vec<u8> = r.get(1)?;
+                Ok((id, crate::search::bytes_to_embedding(&bytes)))
+            })?
+            .filter_map(|r| r.ok())
+            .map(|(id, emb)| (id, crate::search::cosine_similarity(query_embedding, &emb)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        Ok(scored.into_iter().take(limit).map(|(id, _)| id).collect())
+    }
+
+    /// Hybrid search: lexical + semantic ranked lists fused via RRF,
+    /// deduplicated to the single best-scoring chunk per document (a
+    /// result list of documents, not a flat list of chunk hits), joined
+    /// with `documents` for filename/doc_type.
+    ///
+    /// `query_embedding: None` (Ollama unreachable for the query itself)
+    /// degrades to lexical-only — same fail-open behaviour as indexing.
+    pub fn search_hybrid(
+        &self,
+        query: &str,
+        query_embedding: Option<&[f32]>,
+        limit: usize,
+    ) -> Result<Vec<crate::search::SearchHit>> {
+        let fts_query = fts5_prefix_query(query);
+        if fts_query.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Overfetch before per-document dedup so a document doesn't lose
+        // its slot just because another of its chunks also matched.
+        let overfetch = (limit * 5).max(50);
+
+        let lexical_hits = self.search_lexical_ranked(&fts_query, overfetch)?;
+        let lexical_ranked: Vec<String> = lexical_hits.iter().map(|(id, _)| id.clone()).collect();
+        let highlight_by_chunk: std::collections::HashMap<String, String> =
+            lexical_hits.into_iter().collect();
+
+        let semantic_ranked = match query_embedding {
+            Some(emb) => self.search_semantic_ranked(emb, overfetch)?,
+            None => vec![],
+        };
+
+        let fused = crate::search::reciprocal_rank_fusion(&lexical_ranked, &semantic_ranked);
+
+        let mut hits = Vec::new();
+        let mut seen_documents = std::collections::HashSet::new();
+
+        for (chunk_id, score, matched_lexical, matched_semantic) in fused {
+            if hits.len() >= limit {
+                break;
+            }
+            let row = self.conn.query_row(
+                r#"SELECT c.document_id, c.text, c.start_offset, c.end_offset,
+                          d.filename, d.doc_type
+                   FROM chunks c JOIN documents d ON d.id = c.document_id
+                   WHERE c.id = ?1"#,
+                params![chunk_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            );
+            let Ok((document_id, text, start_offset, end_offset, filename, doc_type)) = row else {
+                continue; // chunk vanished (reindexed mid-search) — skip, don't fail the whole search
+            };
+            if !seen_documents.insert(document_id.clone()) {
+                continue; // keep only this document's best-scoring chunk
+            }
+
+            let raw_highlight = highlight_by_chunk.get(&chunk_id).cloned();
+            let highlighted = raw_highlight
+                .map(|h| h.replace('\u{1}', "<mark>").replace('\u{2}', "</mark>"));
+
+            hits.push(crate::search::SearchHit {
+                document_id,
+                filename,
+                doc_type,
+                snippet: text,
+                start_offset,
+                end_offset,
+                highlighted,
+                score,
+                matched_lexical,
+                matched_semantic,
+            });
+        }
+
+        Ok(hits)
+    }
+}
+
+/// FTS5 query syntax needs each user-typed token turned into a prefix
+/// match (`term*`) for Ulauncher-style instant-as-you-type search — a
+/// partial word like "fakt" should surface "faktura" while the user is
+/// still typing, not just exact-word matches. Non-alphanumeric input is
+/// stripped per token to avoid FTS5 syntax errors on stray quotes/colons
+/// (which have special meaning in FTS5 query syntax).
+fn fts5_prefix_query(user_query: &str) -> String {
+    user_query
+        .split_whitespace()
+        .map(|tok| tok.chars().filter(|c| c.is_alphanumeric()).collect::<String>())
+        .filter(|tok| !tok.is_empty())
+        .map(|tok| format!("{tok}*"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -452,5 +666,145 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count_after_v2, 1, "old images must be cleared, not kept alongside the new set");
+    }
+
+    fn save_doc(db: &Database, original_path: &str, full_text: &str) -> String {
+        let mut doc = doc_with_images(original_path, 0);
+        doc.full_text = Some(full_text.to_string());
+        db.save_document(&doc).unwrap()
+    }
+
+    #[test]
+    fn search_hybrid_finds_lexical_match_with_highlighting() {
+        let (_dir, db) = temp_db();
+        let text = "To jest umowa najmu lokalu mieszkalnego w Warszawie.";
+        let doc_id = save_doc(&db, "/docs/a.pdf", text);
+
+        db.replace_chunks(
+            &doc_id,
+            &[crate::search::IndexedChunk {
+                text: text.to_string(),
+                start: 0,
+                end: text.len() as i64,
+                embedding: None,
+            }],
+        )
+        .unwrap();
+
+        let hits = db.search_hybrid("najmu", None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].document_id, doc_id);
+        assert!(hits[0].matched_lexical);
+        assert!(!hits[0].matched_semantic);
+        let hl = hits[0].highlighted.as_ref().expect("lexical hit must have highlight markup");
+        assert!(hl.contains("<mark>najmu</mark>"), "got: {hl}");
+    }
+
+    #[test]
+    fn search_hybrid_finds_semantic_match_without_lexical_overlap() {
+        let (_dir, db) = temp_db();
+        let text = "Zawartosc dokumentu o czynszu i wynajmie nieruchomosci.";
+        let doc_id = save_doc(&db, "/docs/b.pdf", text);
+
+        db.replace_chunks(
+            &doc_id,
+            &[crate::search::IndexedChunk {
+                text: text.to_string(),
+                start: 0,
+                end: text.len() as i64,
+                embedding: Some(vec![1.0, 0.0, 0.0, 0.0]),
+            }],
+        )
+        .unwrap();
+
+        // Query shares zero words with the chunk — only the embedding can find it.
+        let query_embedding = vec![0.9, 0.1, 0.0, 0.0];
+        let hits = db
+            .search_hybrid("zupelnie inne slowa xyz", Some(&query_embedding), 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].matched_semantic);
+        assert!(!hits[0].matched_lexical);
+        assert!(hits[0].highlighted.is_none(), "semantic-only hit should have no highlight markup");
+    }
+
+    #[test]
+    fn search_hybrid_dedupes_to_one_hit_per_document() {
+        let (_dir, db) = temp_db();
+        let text = "Faktura numer jeden. Faktura numer dwa dotyczaca tego samego kontraktu.";
+        let doc_id = save_doc(&db, "/docs/c.pdf", text);
+
+        db.replace_chunks(
+            &doc_id,
+            &[
+                crate::search::IndexedChunk { text: "Faktura numer jeden.".into(), start: 0, end: 20, embedding: None },
+                crate::search::IndexedChunk {
+                    text: "Faktura numer dwa dotyczaca tego samego kontraktu.".into(),
+                    start: 21,
+                    end: 72,
+                    embedding: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        let hits = db.search_hybrid("faktura", None, 10).unwrap();
+        assert_eq!(hits.len(), 1, "both chunks match 'faktura' but must dedupe to one hit per document");
+        assert_eq!(hits[0].document_id, doc_id);
+    }
+
+    #[test]
+    fn replace_chunks_clears_old_rows_on_reindex() {
+        let (_dir, db) = temp_db();
+        let doc_id = save_doc(&db, "/docs/d.pdf", "stara wersja tekstu");
+
+        db.replace_chunks(
+            &doc_id,
+            &[crate::search::IndexedChunk { text: "stara wersja tekstu".into(), start: 0, end: 19, embedding: None }],
+        )
+        .unwrap();
+        assert_eq!(db.search_hybrid("stara", None, 10).unwrap().len(), 1);
+
+        db.replace_chunks(
+            &doc_id,
+            &[crate::search::IndexedChunk { text: "nowa wersja tekstu".into(), start: 0, end: 18, embedding: None }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.search_hybrid("stara", None, 10).unwrap().len(),
+            0,
+            "old chunk text must be gone from the FTS index after reindexing"
+        );
+        assert_eq!(db.search_hybrid("nowa", None, 10).unwrap().len(), 1);
+
+        let chunk_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks WHERE document_id=?1", params![doc_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(chunk_count, 1, "must not accumulate chunk rows across reindexes — same bug class as CRITICAL#1");
+    }
+
+    #[test]
+    fn search_hybrid_handles_query_punctuation_without_fts5_syntax_error() {
+        let (_dir, db) = temp_db();
+        let doc_id = save_doc(&db, "/docs/e.pdf", "test dokumentu");
+        db.replace_chunks(
+            &doc_id,
+            &[crate::search::IndexedChunk { text: "test dokumentu".into(), start: 0, end: 14, embedding: None }],
+        )
+        .unwrap();
+
+        // Quotes/colons have special meaning in FTS5 MATCH syntax — a
+        // naive query must not crash the search.
+        let result = db.search_hybrid("test\" OR :weird*", None, 10);
+        assert!(result.is_ok(), "punctuation in a user-typed query must not cause a MATCH syntax error");
+    }
+
+    #[test]
+    fn search_hybrid_empty_query_returns_no_results_not_an_error() {
+        let (_dir, db) = temp_db();
+        let hits = db.search_hybrid("   ", None, 10).unwrap();
+        assert_eq!(hits.len(), 0);
     }
 }

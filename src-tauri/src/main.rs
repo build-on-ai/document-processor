@@ -3,6 +3,7 @@
 
 mod db;
 mod parser;
+mod search;
 
 use db::Database;
 use parser::{DocumentProcessor, ProcessedDocument};
@@ -38,6 +39,35 @@ struct AppState {
     db: Mutex<Database>,
     processor: DocumentProcessor,
     watch_folder: Mutex<Option<PathBuf>>,
+}
+
+/// Chunk + embed `full_text` and (re)index it for search. Embeds
+/// chunk-by-chunk against the local Ollama instance *before* taking the
+/// db lock — a std::sync::MutexGuard held across an `.await` doesn't
+/// compile cleanly in an async fn (it isn't Send), so all the async
+/// work happens first and the lock is only taken for the final,
+/// synchronous `replace_chunks` write.
+///
+/// Never fails the caller: a document that saved successfully but
+/// couldn't be indexed (Ollama down, or any other issue) is still a
+/// successful import — it just doesn't show up in search until the
+/// next reprocess. Errors are logged, not propagated.
+async fn index_document_for_search(state: &State<'_, AppState>, document_id: &str, full_text: &str) {
+    let chunk_specs = search::chunk_with_offsets(full_text, 1000);
+    let mut indexed = Vec::with_capacity(chunk_specs.len());
+    for (text, start, end) in chunk_specs {
+        let embedding = search::embed_text(&text).await.ok();
+        indexed.push(search::IndexedChunk {
+            text,
+            start: start as i64,
+            end: end as i64,
+            embedding,
+        });
+    }
+    let db = state.db.lock().unwrap();
+    if let Err(e) = db.replace_chunks(document_id, &indexed) {
+        eprintln!("Failed to index document {document_id} for search: {e}");
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -100,9 +130,16 @@ async fn process_document(state: State<'_, AppState>, path: String) -> Result<Pr
     // Save to database. On reprocess, the row is saved under the
     // existing document's id, not `result.id` (freshly generated for
     // this run) — overwrite it so the frontend gets an id that actually
-    // resolves via get_document.
-    let db = state.db.lock().unwrap();
-    result.id = db.save_document(&result).map_err(|e| e.to_string())?;
+    // resolves via get_document. Block-scoped: a bare `drop(db)` isn't
+    // reliably enough for rustc's Send analysis on the generated future
+    // to see the MutexGuard as gone before the `.await` below — ending
+    // its lexical scope is.
+    {
+        let db = state.db.lock().unwrap();
+        result.id = db.save_document(&result).map_err(|e| e.to_string())?;
+    }
+
+    index_document_for_search(&state, &result.id, result.full_text.as_deref().unwrap_or("")).await;
 
     Ok(result)
 }
@@ -174,9 +211,13 @@ async fn scan_folder(state: State<'_, AppState>, path: String) -> Result<Vec<Pro
         // Process document
         match state.processor.process(&file_path).await {
             Ok(mut doc) => {
-                let db = state.db.lock().unwrap();
-                if let Ok(saved_id) = db.save_document(&doc) {
+                let saved = {
+                    let db = state.db.lock().unwrap();
+                    db.save_document(&doc)
+                };
+                if let Ok(saved_id) = saved {
                     doc.id = saved_id;
+                    index_document_for_search(&state, &doc.id, doc.full_text.as_deref().unwrap_or("")).await;
                     results.push(doc);
                 }
             }
@@ -433,9 +474,13 @@ async fn scan_folder_force(state: State<'_, AppState>, path: String) -> Result<V
         // Force process (update existing)
         match state.processor.process(&file_path).await {
             Ok(mut doc) => {
-                let db = state.db.lock().unwrap();
-                if let Ok(saved_id) = db.save_document(&doc) {
+                let saved = {
+                    let db = state.db.lock().unwrap();
+                    db.save_document(&doc)
+                };
+                if let Ok(saved_id) = saved {
                     doc.id = saved_id;
+                    index_document_for_search(&state, &doc.id, doc.full_text.as_deref().unwrap_or("")).await;
                     results.push(doc);
                 }
             }
@@ -446,6 +491,24 @@ async fn scan_folder_force(state: State<'_, AppState>, path: String) -> Result<V
     }
 
     Ok(results)
+}
+
+/// Instant-as-you-type search (Ulauncher-style): the frontend calls this
+/// on every keystroke (debounced). Empty/whitespace-only queries return
+/// no results rather than erroring, since that's simply the state
+/// before the user has typed anything meaningful.
+#[tauri::command]
+async fn search_documents(state: State<'_, AppState>, query: String) -> Result<Vec<search::SearchHit>, String> {
+    if query.trim().is_empty() {
+        return Ok(vec![]);
+    }
+    // Degrades to lexical-only if Ollama is unreachable — .ok() turns a
+    // failed embed into "skip the semantic half", not a search failure.
+    let query_embedding = search::embed_text(&query).await.ok();
+
+    let db = state.db.lock().unwrap();
+    db.search_hybrid(&query, query_embedding.as_deref(), 20)
+        .map_err(|e| e.to_string())
 }
 
 fn main() {
@@ -492,6 +555,7 @@ fn main() {
             export_document_md,
             export_document_html,
             open_file,
+            search_documents,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
