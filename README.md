@@ -9,7 +9,7 @@ Built with **Rust + Tauri + Svelte** for maximum performance and minimal footpri
 - **Multi-format parsing**: PDF, DOCX, TXT (`.doc` files are accepted but routed through the DOCX parser — pure legacy `.doc` binary support is not implemented; RTF is not supported)
 - **Image extraction with context**: Images are extracted with surrounding text preserved
 - **Document classification**: Automatic detection of document types (umowa, pozew, ustawa, etc.)
-- **Watch folder**: Automatic processing of new documents
+- **Watch folder**: remembers a target folder for manual re-scan — new files are **not** picked up automatically; you re-run the scan yourself
 - **SQLite database**: Fast search and organization
 - **Modern UI**: Dark theme, responsive design
 - **Linux desktop**: built and distributed for Linux (deb / AppImage); the Tauri toolchain compiles on Windows + macOS but no installers are produced by the default bundle config — adding `nsis` / `dmg` targets to `tauri.conf.json` is welcomed via a PR
@@ -68,15 +68,18 @@ npm run tauri dev
 
 1. Launch the application
 2. Drag & drop documents or click to browse
-3. Set a "Watch Folder" for automatic processing
+3. Optionally set a "Watch Folder" to remember a folder for manual re-scan (it does not watch automatically — use "Scan again" to pick up new files)
 4. View processed documents with extracted text and images
 
 ### Output Structure
 
-Processed documents land under the app's data directory:
+Processed documents land under the OS-standard per-app data directory
+(resolved via Tauri's path resolver — `$XDG_DATA_HOME/com.buildonai.document-processor`
+on Linux, i.e. `~/.local/share/com.buildonai.document-processor` unless
+`XDG_DATA_HOME` is set; the platform equivalent elsewhere):
 
 ```
-<project-root>/dane/
+<app-data-dir>/
 ├── documents.db                       # SQLite index of every processed file
 └── przetworzone/<document-id>/        # one folder per document
     ├── document.md                    # Human-readable markdown
@@ -88,11 +91,10 @@ Processed documents land under the app's data directory:
     └── original.<ext>                 # Original file copy
 ```
 
-`<project-root>` is the directory the launcher selects on startup (the
-working directory under development; `/opt/document-processor` on a
-packaged install). `dane/` and `przetworzone/` are Polish legacy
-identifiers (Polish for "data" and "processed") — see CONTRIBUTING for
-the rename policy.
+This resolves the same way whether you're running `cargo tauri dev` or
+a packaged `.deb`/AppImage install — it does not depend on where the
+executable lives. `przetworzone/` is a Polish legacy identifier
+(Polish for "processed") — see CONTRIBUTING for the rename policy.
 
 ### Image Context
 
@@ -100,8 +102,7 @@ Each image includes:
 - `context_before`: 200 characters of text before the image
 - `context_after`: 200 characters after
 - `position_marker`: Page and position reference
-- `ocr_text`: Text extracted from image (if applicable)
-- `ai_description`: AI-generated description (when available)
+- `ocr_text`, `ai_description`: reserved columns for a future OCR / AI-description pass — **not implemented**, always empty today. Kept in the schema so a later migration doesn't have to add them; don't build against them expecting real values.
 
 ## Integrations
 

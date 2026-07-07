@@ -29,9 +29,6 @@ base64 = "0.22"
 # SQLite
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-# File watching
-notify = "8"
-
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 

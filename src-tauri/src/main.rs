@@ -3,14 +3,36 @@
 
 mod db;
 mod parser;
-mod watcher;
 
 use db::Database;
 use parser::{DocumentProcessor, ProcessedDocument};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Manager, State};
+
+/// The app's writable data directory, resolved through Tauri's own path
+/// resolver (`dirs::data_dir()/<bundle identifier>` on desktop — see
+/// tauri.conf.json's `identifier`) instead of walking up from the
+/// executable's path looking for a `src-tauri/` + `package.json` dev
+/// checkout. A packaged install's executable lives under /usr/bin or
+/// similar, which never has those siblings, so the old lookup always
+/// fell through to a hardcoded `/opt/document-processor` that the
+/// installed binary has no permission to create (Report 3/4 CRITICAL #2).
+fn app_data_root(app: &tauri::AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .expect("resolve app data directory")
+}
+
+/// `<app_data_dir>/export`, created on demand. Shared by the three
+/// export commands — previously each repeated the same project-root
+/// discovery independently.
+fn export_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app_data_root(app).join("export");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
 
 struct AppState {
     db: Mutex<Database>,
@@ -22,8 +44,6 @@ struct AppState {
 struct Settings {
     watch_folder: Option<String>,
     output_folder: Option<String>,
-    ocr_enabled: bool,
-    ai_classification: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -39,8 +59,6 @@ fn get_settings(state: State<AppState>) -> Result<Settings, String> {
     Ok(Settings {
         watch_folder: watch.as_ref().map(|p| p.to_string_lossy().to_string()),
         output_folder: None,
-        ocr_enabled: true,
-        ai_classification: true,
     })
 }
 
@@ -192,25 +210,12 @@ struct ExportMetadata {
 }
 
 #[tauri::command]
-async fn export_to_json(state: State<'_, AppState>) -> Result<String, String> {
+async fn export_to_json(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let db = state.db.lock().unwrap();
     let docs = db.get_recent_documents(1000).map_err(|e| e.to_string())?;
     drop(db);
 
-    // Get project root for export path
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_default();
-
-    let project_root = exe_dir
-        .ancestors()
-        .find(|p| p.join("src-tauri").is_dir() && p.join("package.json").exists())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("/opt/document-processor"));
-
-    let export_dir = project_root.join("dane").join("export");
-    std::fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
+    let export_dir = export_dir(&app)?;
 
     let mut manifest = vec![];
 
@@ -276,24 +281,12 @@ async fn open_file(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn export_document_html(state: State<'_, AppState>, id: String) -> Result<String, String> {
+async fn export_document_html(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<String, String> {
     let db = state.db.lock().unwrap();
     let doc = db.get_document(&id).map_err(|e| e.to_string())?;
     drop(db);
 
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_default();
-
-    let project_root = exe_dir
-        .ancestors()
-        .find(|p| p.join("src-tauri").is_dir() && p.join("package.json").exists())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("/opt/document-processor"));
-
-    let export_dir = project_root.join("dane").join("export");
-    std::fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
+    let export_dir = export_dir(&app)?;
 
     let html_content = format!(
         r#"<!DOCTYPE html>
@@ -340,25 +333,12 @@ async fn export_document_html(state: State<'_, AppState>, id: String) -> Result<
 }
 
 #[tauri::command]
-async fn export_document_md(state: State<'_, AppState>, id: String) -> Result<String, String> {
+async fn export_document_md(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<String, String> {
     let db = state.db.lock().unwrap();
     let doc = db.get_document(&id).map_err(|e| e.to_string())?;
     drop(db);
 
-    // Get project root for export path
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_default();
-
-    let project_root = exe_dir
-        .ancestors()
-        .find(|p| p.join("src-tauri").is_dir() && p.join("package.json").exists())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("/opt/document-processor"));
-
-    let export_dir = project_root.join("dane").join("export");
-    std::fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
+    let export_dir = export_dir(&app)?;
 
     // Create markdown content
     let md_content = format!(
@@ -469,48 +449,33 @@ async fn scan_folder_force(state: State<'_, AppState>, path: String) -> Result<V
 }
 
 fn main() {
-    // Initialize database in project's data folder
-    // Get the executable's directory or use current dir
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    // Use data/ folder in project root (go up from target/release)
-    // Look for directory that has src-tauri as child (not as self name)
-    let project_root = exe_dir
-        .ancestors()
-        .find(|p| p.join("src-tauri").is_dir() && p.join("package.json").exists())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| {
-            // Fallback: hardcoded project path for development
-            PathBuf::from("/opt/document-processor")
-        });
-
-    let data_dir = project_root.join("dane");
-    let db_path = data_dir.join("documents.db");
-
-    std::fs::create_dir_all(&data_dir).ok();
-    std::fs::create_dir_all(project_root.join("sekrety")).ok();
-
-    let db = Database::new(&db_path).expect("Failed to initialize database");
-
-    // Load watch folder from settings
-    let watch_folder = db.get_setting("watch_folder").ok().flatten().map(PathBuf::from);
-
-    println!("Document Processor data directory: {}", data_dir.display());
-
-    let app_state = AppState {
-        db: Mutex::new(db),
-        processor: DocumentProcessor::new(data_dir),
-        watch_folder: Mutex::new(watch_folder),
-    };
-
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
-        .manage(app_state)
+        .setup(|app| {
+            // Resolved via Tauri's path resolver, not the executable's
+            // location — see app_data_root's doc comment (Report 3/4
+            // CRITICAL #2).
+            let data_dir = app_data_root(app.handle());
+            std::fs::create_dir_all(&data_dir).expect("create app data directory");
+
+            let db_path = data_dir.join("documents.db");
+            let db = Database::new(&db_path).expect("Failed to initialize database");
+
+            // Load watch folder from settings
+            let watch_folder = db.get_setting("watch_folder").ok().flatten().map(PathBuf::from);
+
+            println!("Document Processor data directory: {}", data_dir.display());
+
+            app.manage(AppState {
+                db: Mutex::new(db),
+                processor: DocumentProcessor::new(data_dir),
+                watch_folder: Mutex::new(watch_folder),
+            });
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_settings,
             set_watch_folder,

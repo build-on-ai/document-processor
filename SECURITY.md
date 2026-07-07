@@ -18,7 +18,7 @@ app does not upload parsed content anywhere by default.
 | Input files (PDF/DOCX/TXT; .doc routed through DOCX parser) | **Untrusted** | Any user-supplied file is parsed. Parser bugs can crash or, in the worst case, let an attacker exploit memory corruption in `pdf-extract` / `lopdf` / `image` crates. We rely on the Rust ecosystem and Tauri's sandbox for containment. |
 | Local filesystem | Trusted within the paths the user opens | Tauri's `fs` plugin scopes access. The app does not walk the filesystem beyond what the user selects or the configured watch folder. |
 | Network | None by default | No telemetry, no analytics, no automatic updates. If you add a plugin that phones home, that is explicitly your addition. |
-| SQLite database | Trusted | Stored on the user's disk under the app's config dir. Treat it as personal data. |
+| SQLite database | Trusted | Stored on the user's disk under the app's data dir (OS-standard location, e.g. `~/.local/share/com.buildonai.document-processor` on Linux). Treat it as personal data. |
 
 ## Deliberate trade-offs (not bugs)
 
