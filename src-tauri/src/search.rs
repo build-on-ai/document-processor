@@ -197,11 +197,80 @@ struct OllamaEmbedResponse {
     embeddings: Vec<Vec<f32>>,
 }
 
-/// Embed one string via the local Ollama instance. `Err` means "Ollama
-/// unreachable or the model isn't pulled" — callers degrade to
+/// Closed → Open → Half-open → Closed/Open. A per-request client
+/// timeout (EMBED_TIMEOUT) bounds how long any *one* call waits, but
+/// doesn't stop new calls from being made — observed empirically
+/// (2026-07-07): Ollama's local instance runs with one request slot at
+/// a time server-side, so once a request wedges the server, every
+/// subsequent request queues up behind it and *also* times out, one
+/// EMBED_TIMEOUT at a time, for as long as the caller keeps trying (a
+/// 2000+-chunk document would be ~2000 sequential 30s waits against a
+/// server known to be stuck — hours of nothing). This breaker stops
+/// sending new requests after FAILURE_THRESHOLD consecutive failures
+/// (skip immediately, no network call, no wait) and only lets one
+/// probe request through once COOLDOWN has passed, closing again (and
+/// resuming normal traffic) the moment a probe succeeds.
+struct CircuitBreaker {
+    consecutive_failures: u32,
+    opened_at: Option<std::time::Instant>,
+    threshold: u32,
+    cooldown: std::time::Duration,
+}
+
+impl CircuitBreaker {
+    const fn new(threshold: u32, cooldown: std::time::Duration) -> Self {
+        Self { consecutive_failures: 0, opened_at: None, threshold, cooldown }
+    }
+
+    /// True if a real request should be attempted (circuit closed, or
+    /// open long enough to allow exactly one half-open probe through).
+    fn allows_attempt(&self) -> bool {
+        if self.consecutive_failures < self.threshold {
+            return true;
+        }
+        match self.opened_at {
+            Some(t) => t.elapsed() >= self.cooldown,
+            None => true,
+        }
+    }
+
+    fn record_result(&mut self, success: bool) {
+        if success {
+            self.consecutive_failures = 0;
+            self.opened_at = None;
+        } else {
+            self.consecutive_failures += 1;
+            if self.consecutive_failures >= self.threshold {
+                // (Re-)start the cooldown clock — covers both the
+                // transition into "open" and a failed half-open probe,
+                // which must wait a full cooldown again before retrying.
+                self.opened_at = Some(std::time::Instant::now());
+            }
+        }
+    }
+}
+
+const CIRCUIT_FAILURE_THRESHOLD: u32 = 3;
+const CIRCUIT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+static EMBED_CIRCUIT: std::sync::Mutex<CircuitBreaker> =
+    std::sync::Mutex::new(CircuitBreaker::new(CIRCUIT_FAILURE_THRESHOLD, CIRCUIT_COOLDOWN));
+
+/// Embed one string via the local Ollama instance, through the circuit
+/// breaker above. `Err` means "Ollama unreachable, the model isn't
+/// pulled, or the breaker is currently open" — callers degrade to
 /// lexical-only search rather than failing outright; this must never be
-/// the reason an import fails (see db.rs::index_document_chunks).
+/// the reason an import fails (see main.rs::index_document_for_search).
 pub async fn embed_text(text: &str) -> Result<Vec<f32>, String> {
+    if !EMBED_CIRCUIT.lock().unwrap().allows_attempt() {
+        return Err("embedding circuit breaker open (Ollama repeatedly failing/timing out) — skipping this request".to_string());
+    }
+
+    let result = ollama_embed_request(text).await;
+    EMBED_CIRCUIT.lock().unwrap().record_result(result.is_ok());
+    result
+}
+
+async fn ollama_embed_request(text: &str) -> Result<Vec<f32>, String> {
     let client = reqwest::Client::new();
     let resp = client
         .post(OLLAMA_EMBED_URL)
@@ -287,6 +356,57 @@ mod tests {
         assert_eq!(segments[0], HighlightSegment { text: "To jest ".into(), marked: false });
         assert_eq!(segments[1], HighlightSegment { text: "najmu".into(), marked: true });
         assert_eq!(segments[2], HighlightSegment { text: " lokalu".into(), marked: false });
+    }
+
+    #[test]
+    fn circuit_breaker_starts_closed() {
+        let cb = CircuitBreaker::new(3, std::time::Duration::from_secs(60));
+        assert!(cb.allows_attempt());
+    }
+
+    #[test]
+    fn circuit_breaker_opens_after_threshold_consecutive_failures() {
+        let mut cb = CircuitBreaker::new(3, std::time::Duration::from_secs(60));
+        cb.record_result(false);
+        assert!(cb.allows_attempt(), "below threshold, still closed");
+        cb.record_result(false);
+        assert!(cb.allows_attempt(), "still below threshold");
+        cb.record_result(false);
+        assert!(!cb.allows_attempt(), "third consecutive failure trips the breaker");
+    }
+
+    #[test]
+    fn circuit_breaker_a_success_resets_the_failure_count() {
+        let mut cb = CircuitBreaker::new(3, std::time::Duration::from_secs(60));
+        cb.record_result(false);
+        cb.record_result(false);
+        cb.record_result(true);
+        cb.record_result(false);
+        cb.record_result(false);
+        assert!(cb.allows_attempt(), "only 2 consecutive failures since the reset");
+    }
+
+    #[test]
+    fn circuit_breaker_allows_one_probe_after_cooldown_and_closes_on_success() {
+        let mut cb = CircuitBreaker::new(2, std::time::Duration::from_millis(20));
+        cb.record_result(false);
+        cb.record_result(false);
+        assert!(!cb.allows_attempt(), "open immediately after tripping");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(cb.allows_attempt(), "cooldown elapsed — one probe let through");
+        cb.record_result(true);
+        assert!(cb.allows_attempt(), "probe succeeded — breaker closed");
+    }
+
+    #[test]
+    fn circuit_breaker_reopens_and_restarts_cooldown_if_the_probe_fails() {
+        let mut cb = CircuitBreaker::new(2, std::time::Duration::from_millis(20));
+        cb.record_result(false);
+        cb.record_result(false);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(cb.allows_attempt(), "cooldown elapsed — probe allowed");
+        cb.record_result(false); // the probe itself fails
+        assert!(!cb.allows_attempt(), "failed probe reopens immediately, doesn't leave it closed");
     }
 
     #[test]
