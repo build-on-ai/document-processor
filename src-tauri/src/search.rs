@@ -210,6 +210,26 @@ struct OllamaEmbedResponse {
 /// (skip immediately, no network call, no wait) and only lets one
 /// probe request through once COOLDOWN has passed, closing again (and
 /// resuming normal traffic) the moment a probe succeeds.
+///
+/// One instance, shared process-wide (see EMBED_CIRCUIT below) between
+/// background indexing and live search-query embedding — deliberately,
+/// not as an accident of using a static: if Ollama is actually wedged,
+/// both paths would independently hit the same 30s timeout anyway, so
+/// sharing the breaker means a live search started while indexing is
+/// stuck fails fast (instant lexical-only) instead of rediscovering the
+/// same timeout on its own. Tradeoff: a transient blip of 3 failures
+/// during indexing also degrades the next live search for a full
+/// COOLDOWN, even if Ollama recovers immediately after.
+///
+/// Not fully atomic under concurrent embed_text calls: allows_attempt()
+/// and record_result() are two separate lock acquisitions (see
+/// embed_text), not one compare-and-swap, so two callers racing during
+/// the half-open window could both see "cooldown elapsed" and both send
+/// a probe. Harmless in this app's actual usage (one background
+/// indexing loop, one interactive user) — a few extra 30s waits in a
+/// rare window, not the hours-long pile-up this breaker exists to
+/// prevent. Would need a dedicated probe-in-flight flag to close that
+/// gap if concurrent embed_text calls become common.
 struct CircuitBreaker {
     consecutive_failures: u32,
     opened_at: Option<std::time::Instant>,
@@ -400,10 +420,18 @@ mod tests {
 
     #[test]
     fn circuit_breaker_reopens_and_restarts_cooldown_if_the_probe_fails() {
-        let mut cb = CircuitBreaker::new(2, std::time::Duration::from_millis(20));
+        // 200ms cooldown, not 20ms: the assertion below runs immediately
+        // after record_result(false) re-arms the cooldown, with no sleep
+        // in between — a 20ms margin was tight enough that a CI
+        // scheduler stall between those two lines could let elapsed()
+        // cross the threshold and flip this assertion. 200ms costs the
+        // same wall-clock in this test (the only sleep is the fixed 30ms
+        // wait for the first cooldown) while making that race
+        // vanishingly unlikely.
+        let mut cb = CircuitBreaker::new(2, std::time::Duration::from_millis(200));
         cb.record_result(false);
         cb.record_result(false);
-        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::thread::sleep(std::time::Duration::from_millis(210));
         assert!(cb.allows_attempt(), "cooldown elapsed — probe allowed");
         cb.record_result(false); // the probe itself fails
         assert!(!cb.allows_attempt(), "failed probe reopens immediately, doesn't leave it closed");
