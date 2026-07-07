@@ -11,6 +11,14 @@ impl Database {
     pub fn new(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
 
+        // Explicit, not relying on the bundled SQLite build's compile-time
+        // default: FK enforcement (and therefore ON DELETE CASCADE below)
+        // is off by default in SQLite unless the library was built with
+        // SQLITE_DEFAULT_FOREIGN_KEYS=1. Must run before creating tables
+        // that declare foreign keys — SQLite reads this pragma per
+        // connection, not per statement.
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS documents (
@@ -43,7 +51,7 @@ impl Database {
                 thumbnail_path TEXT,
                 width INTEGER,
                 height INTEGER,
-                FOREIGN KEY (document_id) REFERENCES documents(id)
+                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS settings (
@@ -86,7 +94,22 @@ impl Database {
         Ok(deleted)
     }
 
-    pub fn save_document(&self, doc: &ProcessedDocument) -> Result<()> {
+    /// Persists `doc`, returning the id the row was actually saved under.
+    ///
+    /// On reprocess (a document already exists for `doc.original_path`),
+    /// that existing row's id is reused — `doc.id` itself is a fresh id
+    /// generated for this processing run and is NOT what ends up as the
+    /// primary key. Callers that hand `doc` back to the frontend as-is
+    /// after saving must overwrite `doc.id` with the returned value, or
+    /// the frontend ends up holding an id that has no corresponding row
+    /// (`get_document` on it 404s).
+    ///
+    /// Uses `unchecked_transaction` (works on `&self`, unlike
+    /// `transaction` which needs `&mut self`) so the document row, the
+    /// old image rows being cleared, and the new image rows all commit
+    /// or roll back together — a failure partway through the image loop
+    /// no longer leaves the document row pointing at a partial image set.
+    pub fn save_document(&self, doc: &ProcessedDocument) -> Result<String> {
         // Check for duplicate by path - update existing instead of creating new
         let existing_id: Option<String> = self.conn.query_row(
             "SELECT id FROM documents WHERE original_path = ?1",
@@ -96,7 +119,9 @@ impl Database {
 
         let doc_id = existing_id.unwrap_or_else(|| doc.id.clone());
 
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+
+        tx.execute(
             r#"
             INSERT OR REPLACE INTO documents
             (id, filename, original_path, doc_type, classification_confidence,
@@ -120,11 +145,16 @@ impl Database {
             ],
         )?;
 
-        // Save images
+        // Reprocessing replaces the image set wholesale: without this,
+        // a document's old images (from a previous pass, possibly for a
+        // page/image count that no longer matches) would linger forever
+        // under the same document_id instead of being replaced.
+        tx.execute("DELETE FROM images WHERE document_id = ?1", params![doc_id])?;
+
         for img in &doc.images {
-            self.conn.execute(
+            tx.execute(
                 r#"
-                INSERT OR REPLACE INTO images
+                INSERT INTO images
                 (id, document_id, filename, page, position_marker,
                  context_before, context_after, ocr_text, ai_description,
                  image_path, thumbnail_path, width, height)
@@ -132,7 +162,7 @@ impl Database {
                 "#,
                 params![
                     img.id,
-                    doc.id,
+                    doc_id,
                     img.filename,
                     img.page,
                     img.position_marker,
@@ -148,7 +178,9 @@ impl Database {
             )?;
         }
 
-        Ok(())
+        tx.commit()?;
+
+        Ok(doc_id)
     }
 
     pub fn get_document(&self, id: &str) -> Result<ProcessedDocument> {
@@ -297,5 +329,128 @@ impl Database {
             params![doc_type, id],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::ExtractedImage;
+    use chrono::Utc;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    fn doc_with_images(original_path: &str, n_images: usize) -> ProcessedDocument {
+        ProcessedDocument {
+            id: Uuid::new_v4().to_string(),
+            filename: "test.pdf".to_string(),
+            original_path: original_path.to_string(),
+            doc_type: Some("umowa".to_string()),
+            classification_confidence: Some(0.9),
+            pages: Some(1),
+            word_count: Some(10),
+            size: 100,
+            full_text: Some("tresc".to_string()),
+            text_preview: Some("tresc".to_string()),
+            metadata: HashMap::new(),
+            processed_at: Utc::now().to_rfc3339(),
+            images: (0..n_images)
+                .map(|i| ExtractedImage {
+                    id: Uuid::new_v4().to_string(),
+                    filename: format!("img_{i}.png"),
+                    page: Some(1),
+                    position_marker: Some(format!("obj_{i}")),
+                    context_before: None,
+                    context_after: None,
+                    ocr_text: None,
+                    ai_description: None,
+                    image_path: Some(format!("/tmp/img_{i}.png")),
+                    thumbnail_path: None,
+                    width: Some(10),
+                    height: Some(10),
+                })
+                .collect(),
+        }
+    }
+
+    fn temp_db() -> (TempDir, Database) {
+        let dir = TempDir::new().unwrap();
+        let db = Database::new(&dir.path().join("test.sqlite")).unwrap();
+        (dir, db)
+    }
+
+    // CRITICAL #1 repro (Report 3/4): reprocessing a document that has
+    // images used to hit SqliteFailure(787, "FOREIGN KEY constraint
+    // failed") because the image rows were inserted with document_id =
+    // doc.id (a *fresh* id generated for this run) instead of the
+    // resolved doc_id (the existing row's actual primary key). This is
+    // the exact "Skanuj ponownie" crash from the audit, reproduced
+    // in-process rather than by re-reading the original bug report.
+    #[test]
+    fn reprocessing_document_with_images_does_not_crash() {
+        let (_dir, db) = temp_db();
+        let doc_v1 = doc_with_images("/docs/contract.pdf", 2);
+
+        let id_v1 = db.save_document(&doc_v1).expect("first save must succeed");
+
+        // Second pass over the same original_path: a fresh ProcessedDocument
+        // (new doc.id, new image ids — exactly what re-running the parser
+        // on the same file produces) must resolve to the SAME row, not crash.
+        let doc_v2 = doc_with_images("/docs/contract.pdf", 3);
+        let id_v2 = db
+            .save_document(&doc_v2)
+            .expect("reprocess with images must not hit a FK violation");
+
+        assert_eq!(id_v1, id_v2, "reprocess must reuse the existing document's id");
+        assert_ne!(id_v2, doc_v2.id, "returned id must be the resolved one, not doc.id");
+
+        let stored = db.get_document(&id_v2).expect("row must exist under the returned id");
+        assert_eq!(stored.original_path, "/docs/contract.pdf");
+    }
+
+    // The no-images variant from the same finding: save_document must
+    // return an id the caller can actually look up afterwards.
+    #[test]
+    fn save_document_returns_a_resolvable_id() {
+        let (_dir, db) = temp_db();
+        let doc = doc_with_images("/docs/no_images.pdf", 0);
+        let doc_id = doc.id.clone();
+
+        let returned = db.save_document(&doc).unwrap();
+        assert_eq!(returned, doc_id, "first save: no existing row, so id is doc.id");
+        db.get_document(&returned).expect("returned id must resolve");
+    }
+
+    // Reprocessing must replace the image set, not accumulate rows from
+    // every previous pass under the same document_id.
+    #[test]
+    fn reprocessing_replaces_stale_images_instead_of_accumulating() {
+        let (_dir, db) = temp_db();
+        let doc_v1 = doc_with_images("/docs/shrinking.pdf", 3);
+        let id = db.save_document(&doc_v1).unwrap();
+
+        let count_after_v1: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM images WHERE document_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_after_v1, 3);
+
+        let doc_v2 = doc_with_images("/docs/shrinking.pdf", 1);
+        db.save_document(&doc_v2).unwrap();
+
+        let count_after_v2: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM images WHERE document_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_after_v2, 1, "old images must be cleared, not kept alongside the new set");
     }
 }

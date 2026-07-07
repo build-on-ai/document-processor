@@ -77,11 +77,14 @@ async fn process_document(state: State<'_, AppState>, path: String) -> Result<Pr
         return Err(format!("File not found: {}", path.display()));
     }
 
-    let result = state.processor.process(&path).await.map_err(|e| e.to_string())?;
+    let mut result = state.processor.process(&path).await.map_err(|e| e.to_string())?;
 
-    // Save to database
+    // Save to database. On reprocess, the row is saved under the
+    // existing document's id, not `result.id` (freshly generated for
+    // this run) — overwrite it so the frontend gets an id that actually
+    // resolves via get_document.
     let db = state.db.lock().unwrap();
-    db.save_document(&result).map_err(|e| e.to_string())?;
+    result.id = db.save_document(&result).map_err(|e| e.to_string())?;
 
     Ok(result)
 }
@@ -152,9 +155,10 @@ async fn scan_folder(state: State<'_, AppState>, path: String) -> Result<Vec<Pro
 
         // Process document
         match state.processor.process(&file_path).await {
-            Ok(doc) => {
+            Ok(mut doc) => {
                 let db = state.db.lock().unwrap();
-                if db.save_document(&doc).is_ok() {
+                if let Ok(saved_id) = db.save_document(&doc) {
+                    doc.id = saved_id;
                     results.push(doc);
                 }
             }
@@ -448,9 +452,10 @@ async fn scan_folder_force(state: State<'_, AppState>, path: String) -> Result<V
 
         // Force process (update existing)
         match state.processor.process(&file_path).await {
-            Ok(doc) => {
+            Ok(mut doc) => {
                 let db = state.db.lock().unwrap();
-                if db.save_document(&doc).is_ok() {
+                if let Ok(saved_id) = db.save_document(&doc) {
+                    doc.id = saved_id;
                     results.push(doc);
                 }
             }
