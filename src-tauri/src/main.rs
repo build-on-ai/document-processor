@@ -54,8 +54,20 @@ struct AppState {
 /// next reprocess. Errors are logged, not propagated.
 async fn index_document_for_search(state: &State<'_, AppState>, document_id: &str, full_text: &str) {
     let chunk_specs = search::chunk_with_offsets(full_text, 1000);
-    let mut indexed = Vec::with_capacity(chunk_specs.len());
-    for (text, start, end) in chunk_specs {
+    let total = chunk_specs.len();
+    // A full-length book (observed: one real 2.1M-char PDF produced
+    // ~2000+ chunks) can take many minutes to embed sequentially against
+    // a local, single-request-at-a-time Ollama instance — chunks/embed
+    // are only committed to the db once, after the whole loop, so
+    // without this the process looks indistinguishable from a hang for
+    // the entire duration of one large document. This is not a progress
+    // bar (the UI doesn't surface it yet) — it's the difference between
+    // "still working" and "stuck" in the log when someone's watching it.
+    if total > 50 {
+        println!("Indexing {document_id}: {total} chunks to embed (large document, this may take a while)...");
+    }
+    let mut indexed = Vec::with_capacity(total);
+    for (i, (text, start, end)) in chunk_specs.into_iter().enumerate() {
         let embedding = search::embed_text(&text).await.ok();
         indexed.push(search::IndexedChunk {
             text,
@@ -63,6 +75,9 @@ async fn index_document_for_search(state: &State<'_, AppState>, document_id: &st
             end: end as i64,
             embedding,
         });
+        if total > 50 && (i + 1) % 50 == 0 {
+            println!("Indexing {document_id}: {}/{total} chunks embedded", i + 1);
+        }
     }
     let db = state.db.lock().unwrap();
     if let Err(e) = db.replace_chunks(document_id, &indexed) {
@@ -535,6 +550,28 @@ fn main() {
                 db: Mutex::new(db),
                 processor: DocumentProcessor::new(data_dir),
                 watch_folder: Mutex::new(watch_folder),
+            });
+
+            // Backfill: documents saved before the search feature
+            // existed (or from a run where indexing failed) have no
+            // chunk rows yet. Runs once at startup, in the background —
+            // does not block the window from opening, and each
+            // document's embed calls are the same fail-open path
+            // index_document_for_search always uses.
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let to_index = {
+                    let state = app_handle.state::<AppState>();
+                    let db = state.db.lock().unwrap();
+                    db.documents_needing_index().unwrap_or_default()
+                };
+                if !to_index.is_empty() {
+                    println!("Backfilling search index for {} document(s)...", to_index.len());
+                }
+                for (doc_id, full_text) in to_index {
+                    let state = app_handle.state::<AppState>();
+                    index_document_for_search(&state, &doc_id, &full_text).await;
+                }
             });
 
             Ok(())

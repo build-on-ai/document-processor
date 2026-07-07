@@ -31,6 +31,21 @@ pub struct IndexedChunk {
 pub const EMBED_DIM: usize = 768;
 const OLLAMA_EMBED_URL: &str = "http://localhost:11434/api/embed";
 const OLLAMA_MODEL: &str = "nomic-embed-text";
+/// Observed empirically (2026-07-07): a batch-indexing run against a
+/// real local Ollama instance stalled on one chunk — CPU in the
+/// llama-server subprocess kept climbing with no response for over six
+/// minutes, on hardware that embeds a typical ~1000-byte chunk in well
+/// under a second otherwise. Root cause not isolated (a specific
+/// chunk's content, model/context-window interaction, or a resource
+/// contention issue), but with no timeout at all a single such request
+/// blocks the entire sequential indexing loop indefinitely — every
+/// chunk after it in every document queued behind it never gets
+/// embedded. 30s is generous versus normal latency (<1s) while still
+/// bounding the worst case; embed_text's fail-open contract (Err →
+/// caller stores embedding: None, lexical search still finds the
+/// chunk) means a timeout here degrades one chunk's semantic
+/// searchability, not the app.
+const EMBED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// RRF constant. Standard choice (Cormack et al.) — large enough that a
 /// single ranking list dominating rank 1 doesn't swamp the other list's
 /// contribution entirely, small enough that rank position still matters.
@@ -190,10 +205,17 @@ pub async fn embed_text(text: &str) -> Result<Vec<f32>, String> {
     let client = reqwest::Client::new();
     let resp = client
         .post(OLLAMA_EMBED_URL)
+        .timeout(EMBED_TIMEOUT)
         .json(&serde_json::json!({ "model": OLLAMA_MODEL, "input": text }))
         .send()
         .await
-        .map_err(|e| format!("ollama unreachable: {e}"))?;
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("ollama request timed out after {}s", EMBED_TIMEOUT.as_secs())
+            } else {
+                format!("ollama unreachable: {e}")
+            }
+        })?;
 
     if !resp.status().is_success() {
         return Err(format!("ollama returned {}", resp.status()));
