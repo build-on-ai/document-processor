@@ -360,6 +360,23 @@ impl Database {
         Ok(())
     }
 
+    /// Documents with text but no chunk rows yet — i.e. saved before the
+    /// search feature existed, or from a run where indexing failed
+    /// earlier. Used once at startup to backfill the search index for a
+    /// corpus that predates chunks/chunks_fts.
+    pub fn documents_needing_index(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.id, d.full_text FROM documents d
+             WHERE d.full_text IS NOT NULL AND d.full_text != ''
+               AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.document_id = d.id)",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
     /// Replace `document_id`'s indexed chunks wholesale — same
     /// reprocess-safety reasoning as images in `save_document`: without
     /// clearing first, a document reprocessed N times would accumulate

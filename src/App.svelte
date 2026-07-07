@@ -15,8 +15,35 @@
   let errorMsg = $state('');
   let dialogOpen = $state(false);
 
+  // Instant search (Ulauncher-style: type, results appear immediately
+  // below, arrow keys + Enter to navigate/open, Escape to close).
+  let searchQuery = $state('');
+  let searchResults = $state([]);
+  let searchOpen = $state(false);
+  let searchLoading = $state(false);
+  let searchSelectedIndex = $state(0);
+  let searchDebounceTimer = null;
+  // {start, end} JS string indices into currentDoc.full_text for the
+  // fragment a search result pointed at — computed via indexOf(snippet)
+  // rather than trusting the backend's byte offsets directly (those are
+  // UTF-8 byte positions; JS strings index by UTF-16 code unit, and
+  // Polish diacritics are multi-byte in UTF-8 but single-unit in UTF-16
+  // — indexOf on the exact snippet text sidesteps that mismatch entirely
+  // instead of trying to convert between the two schemes).
+  let highlightRange = $state(null);
+
   onMount(async () => {
     console.log('App mounted, initializing...');
+
+    // Close the search results dropdown on an outside click — the
+    // dropdown itself handles its own clicks (openSearchResult), this
+    // only needs to catch clicks elsewhere on the page.
+    const onDocumentClick = (event) => {
+      if (searchOpen && !event.target.closest('.search-container')) {
+        closeSearch();
+      }
+    };
+    document.addEventListener('click', onDocumentClick);
 
     // Load settings and stats
     try {
@@ -311,10 +338,97 @@
   async function viewDocument(doc) {
     try {
       currentDoc = await invoke('get_document_details', { id: doc.id });
+      highlightRange = null;
     } catch (e) {
       console.error('Failed to load document:', e);
       errorMsg = 'Failed to load document: ' + e;
     }
+  }
+
+  function onSearchInput(event) {
+    searchQuery = event.target.value;
+    searchOpen = true;
+    searchSelectedIndex = 0;
+    clearTimeout(searchDebounceTimer);
+
+    if (!searchQuery.trim()) {
+      searchResults = [];
+      searchLoading = false;
+      return;
+    }
+
+    searchLoading = true;
+    // Debounced, not on every raw keystroke: an embedding call to Ollama
+    // plus an FTS5 query on every single character would queue up faster
+    // than either can answer once the corpus grows. 150ms is short enough
+    // to still feel instant, long enough to collapse a fast typist's burst
+    // into one request.
+    searchDebounceTimer = setTimeout(async () => {
+      const q = searchQuery;
+      try {
+        const results = await invoke('search_documents', { query: q });
+        if (q === searchQuery) {
+          // still the latest query — an in-flight older request
+          // resolving after a newer one must not clobber fresher results.
+          searchResults = results;
+        }
+      } catch (e) {
+        console.error('Search failed:', e);
+        searchResults = [];
+      } finally {
+        if (q === searchQuery) searchLoading = false;
+      }
+    }, 150);
+  }
+
+  async function openSearchResult(hit) {
+    try {
+      currentDoc = await invoke('get_document_details', { id: hit.document_id });
+      const idx = (currentDoc.full_text || '').indexOf(hit.snippet);
+      highlightRange = idx >= 0 ? { start: idx, end: idx + hit.snippet.length } : null;
+      closeSearch();
+      requestAnimationFrame(() => {
+        document.getElementById('search-highlight-mark')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+    } catch (e) {
+      console.error('Failed to open search result:', e);
+      errorMsg = 'Failed to open document: ' + e;
+    }
+  }
+
+  function closeSearch() {
+    searchOpen = false;
+    searchQuery = '';
+    searchResults = [];
+  }
+
+  function onSearchKeydown(event) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      searchSelectedIndex = Math.min(searchSelectedIndex + 1, searchResults.length - 1);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      searchSelectedIndex = Math.max(searchSelectedIndex - 1, 0);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      if (searchResults[searchSelectedIndex]) openSearchResult(searchResults[searchSelectedIndex]);
+    } else if (event.key === 'Escape') {
+      closeSearch();
+    }
+  }
+
+  // Builds render-safe segments for the full document view's highlight —
+  // same {text, marked} shape backend search hits use, computed here in
+  // plain JS since this range comes from a local indexOf, not IPC.
+  function segmentsForHighlight(text, range) {
+    if (!range || range.start < 0 || range.end > text.length || range.start >= range.end) {
+      return [{ text, marked: false }];
+    }
+    const segments = [];
+    if (range.start > 0) segments.push({ text: text.slice(0, range.start), marked: false });
+    segments.push({ text: text.slice(range.start, range.end), marked: true });
+    if (range.end < text.length) segments.push({ text: text.slice(range.end), marked: false });
+    return segments;
   }
 
   function getDocTypeColor(type) {
@@ -351,6 +465,55 @@
       </svg>
       <h1>Document Processor</h1>
     </div>
+
+    <div class="search-container">
+      <input
+        type="text"
+        class="search-input"
+        placeholder="Szukaj w dokumentach... (pełny tekst + znaczenie)"
+        value={searchQuery}
+        oninput={onSearchInput}
+        onkeydown={onSearchKeydown}
+        onfocus={() => { if (searchQuery.trim()) searchOpen = true; }}
+      />
+      {#if searchOpen && searchQuery.trim()}
+        <div class="search-results" role="listbox">
+          {#if searchLoading}
+            <div class="search-status">Szukam…</div>
+          {:else if searchResults.length === 0}
+            <div class="search-status">Brak wyników dla &quot;{searchQuery}&quot;</div>
+          {:else}
+            {#each searchResults as hit, i}
+              <button
+                type="button"
+                class="search-result"
+                class:selected={i === searchSelectedIndex}
+                onclick={() => openSearchResult(hit)}
+                onmouseenter={() => searchSelectedIndex = i}
+              >
+                <div class="search-result-head">
+                  <span class="search-result-filename">{hit.filename}</span>
+                  <span class="badge {getDocTypeColor(hit.doc_type)}">{hit.doc_type || 'unknown'}</span>
+                  {#if hit.matched_semantic && !hit.matched_lexical}
+                    <span class="badge semantic-badge" title="Znalezione po znaczeniu, nie po dokładnym słowie">🧠 znaczenie</span>
+                  {/if}
+                </div>
+                <p class="search-result-snippet">
+                  {#if hit.highlighted}
+                    {#each hit.highlighted as seg}
+                      {#if seg.marked}<mark>{seg.text}</mark>{:else}{seg.text}{/if}
+                    {/each}
+                  {:else}
+                    {hit.snippet}
+                  {/if}
+                </p>
+              </button>
+            {/each}
+          {/if}
+        </div>
+      {/if}
+    </div>
+
     <div class="stats">
       <div class="stat">
         <span class="value">{stats.total}</span>
@@ -450,7 +613,7 @@
       {:else}
         <div class="document-view">
           <div class="doc-header">
-            <button class="secondary" onclick={() => currentDoc = null}>
+            <button class="secondary" onclick={() => { currentDoc = null; highlightRange = null; }}>
               &larr; Wróć
             </button>
             <h2>{currentDoc.filename}</h2>
@@ -519,7 +682,9 @@
           <div class="doc-content">
             <h3>Pełna treść dokumentu</h3>
             <div class="text-preview">
-              {currentDoc.full_text || currentDoc.text_preview || 'No text extracted'}
+              {#each segmentsForHighlight(currentDoc.full_text || currentDoc.text_preview || 'No text extracted', highlightRange) as seg}
+                {#if seg.marked}<mark id="search-highlight-mark">{seg.text}</mark>{:else}{seg.text}{/if}
+              {/each}
             </div>
           </div>
 
