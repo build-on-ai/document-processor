@@ -508,9 +508,9 @@ impl Database {
                 continue; // keep only this document's best-scoring chunk
             }
 
-            let raw_highlight = highlight_by_chunk.get(&chunk_id).cloned();
-            let highlighted = raw_highlight
-                .map(|h| h.replace('\u{1}', "<mark>").replace('\u{2}', "</mark>"));
+            let highlighted = highlight_by_chunk
+                .get(&chunk_id)
+                .map(|raw| crate::search::parse_highlight_markers(raw));
 
             hits.push(crate::search::SearchHit {
                 document_id,
@@ -696,8 +696,13 @@ mod tests {
         assert_eq!(hits[0].document_id, doc_id);
         assert!(hits[0].matched_lexical);
         assert!(!hits[0].matched_semantic);
-        let hl = hits[0].highlighted.as_ref().expect("lexical hit must have highlight markup");
-        assert!(hl.contains("<mark>najmu</mark>"), "got: {hl}");
+        let segments = hits[0].highlighted.as_ref().expect("lexical hit must have highlight segments");
+        let marked: Vec<&str> = segments.iter().filter(|s| s.marked).map(|s| s.text.as_str()).collect();
+        assert_eq!(marked, vec!["najmu"], "got segments: {segments:?}");
+        // No raw markup in any segment's text — see parse_highlight_markers's doc comment.
+        for seg in segments {
+            assert!(!seg.text.contains('\u{1}') && !seg.text.contains('\u{2}'));
+        }
     }
 
     #[test]

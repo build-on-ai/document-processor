@@ -48,15 +48,55 @@ pub struct SearchHit {
     /// what a "scroll to this fragment and highlight it" UI needs.
     pub start_offset: i64,
     pub end_offset: i64,
-    /// FTS5 `highlight()` output for the snippet when the hit matched
-    /// lexically (marked terms wrapped in <mark></mark>); None when the
-    /// hit is semantic-only (no literal term overlap to mark).
-    pub highlighted: Option<String>,
+    /// Pre-split segments for lexical hits (`None` for semantic-only
+    /// hits — no literal term overlap to mark). Segments, not a raw
+    /// HTML string: `snippet` is exact document content, not something
+    /// safe to inject via `{@html}` on the frontend (a PDF/DOCX could
+    /// contain literal "<"/">" text). The frontend renders `text`
+    /// through normal auto-escaped interpolation and only wraps
+    /// `marked` segments in `<mark>` itself — no raw HTML crosses IPC.
+    pub highlighted: Option<Vec<HighlightSegment>>,
     pub score: f64,
     /// Which signal(s) produced this hit — surfaced so the UI can show
     /// e.g. a small "semantic match" badge distinctly from a lexical one.
     pub matched_lexical: bool,
     pub matched_semantic: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HighlightSegment {
+    pub text: String,
+    pub marked: bool,
+}
+
+/// Split FTS5 `highlight()` output — delimited with U+0001/U+0002
+/// control-character markers instead of literal HTML tags (see
+/// `search_lexical_ranked` in db.rs) — into safe-to-render segments.
+pub fn parse_highlight_markers(s: &str) -> Vec<HighlightSegment> {
+    let mut segments = Vec::new();
+    let mut marked = false;
+    let mut current = String::new();
+    for c in s.chars() {
+        match c {
+            '\u{1}' => {
+                if !current.is_empty() {
+                    segments.push(HighlightSegment { text: std::mem::take(&mut current), marked });
+                }
+                marked = true;
+            }
+            '\u{2}' => {
+                if !current.is_empty() {
+                    segments.push(HighlightSegment { text: std::mem::take(&mut current), marked });
+                }
+                marked = false;
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        segments.push(HighlightSegment { text: current, marked });
+    }
+    segments
 }
 
 /// Split `text` into chunks that are exact substrings of the original
@@ -216,6 +256,33 @@ pub fn reciprocal_rank_fusion(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_highlight_markers_splits_marked_and_unmarked_segments() {
+        let raw = "To jest \u{1}najmu\u{2} lokalu";
+        let segments = parse_highlight_markers(raw);
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0], HighlightSegment { text: "To jest ".into(), marked: false });
+        assert_eq!(segments[1], HighlightSegment { text: "najmu".into(), marked: true });
+        assert_eq!(segments[2], HighlightSegment { text: " lokalu".into(), marked: false });
+    }
+
+    #[test]
+    fn parse_highlight_markers_handles_no_markers() {
+        let segments = parse_highlight_markers("zwykly tekst bez trafien");
+        assert_eq!(segments.len(), 1);
+        assert!(!segments[0].marked);
+    }
+
+    #[test]
+    fn parse_highlight_markers_never_leaks_the_raw_control_characters() {
+        let raw = "\u{1}kill\u{2} -9 process, \u{1}sudo\u{2} rm";
+        let segments = parse_highlight_markers(raw);
+        for seg in &segments {
+            assert!(!seg.text.contains('\u{1}'));
+            assert!(!seg.text.contains('\u{2}'));
+        }
+    }
 
     #[test]
     fn chunks_are_exact_substrings_with_correct_offsets() {
