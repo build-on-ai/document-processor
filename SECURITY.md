@@ -17,7 +17,7 @@ app does not upload parsed content anywhere by default.
 |---|---|---|
 | Input files (PDF/DOCX/TXT; .doc routed through DOCX parser) | **Untrusted** | Any user-supplied file is parsed. Parser bugs can crash or, in the worst case, let an attacker exploit memory corruption in `pdf-extract` / `lopdf` / `image` crates. We rely on the Rust ecosystem and Tauri's sandbox for containment. |
 | Local filesystem | Trusted within the paths the user opens | Tauri's `fs` plugin scopes access. The app does not walk the filesystem beyond what the user selects or the configured watch folder. |
-| Network | None by default | No telemetry, no analytics, no automatic updates. If you add a plugin that phones home, that is explicitly your addition. |
+| Network | Loopback only | No telemetry, no analytics, no automatic updates, no cloud calls. The semantic half of search sends chunk text and search queries via HTTP POST to a **local Ollama** instance at `http://localhost:11434/api/embed` (`src/search.rs`); when Ollama is unreachable, a circuit breaker fails open and search degrades to lexical-only (FTS5). Nothing leaves the loopback interface. If you add a plugin that phones home, that is explicitly your addition. |
 | SQLite database | Trusted | Stored on the user's disk under the app's data dir (OS-standard location, e.g. `~/.local/share/com.buildonai.document-processor` on Linux). Treat it as personal data. |
 
 ## Deliberate trade-offs (not bugs)
@@ -52,10 +52,12 @@ in `tauri build --release`.
 
 ### Watch folder opens a TOCTOU window
 
-The watch-folder feature processes any file that lands in a
-configured directory. If an attacker can write to that directory,
-they can feed arbitrary input to the parsers. **Point the watch
-folder at something only you write to.**
+The watch-folder feature processes any file present in the
+configured directory at the moment you trigger a re-scan (scanning
+is manual — the app does not watch the filesystem). If an attacker
+can write to that directory before you re-scan, they can feed
+arbitrary input to the parsers. **Point the watch folder at
+something only you write to.**
 
 ### No code signing on the built binaries
 

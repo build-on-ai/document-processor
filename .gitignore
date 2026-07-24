@@ -9,3 +9,4 @@ sekrety/
 
 # Tauri auto-generated schemas (regenerated on build)
 src-tauri/gen/
+__pycache__/

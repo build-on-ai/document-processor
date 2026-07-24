@@ -32,13 +32,14 @@ Before your PR can be merged, you must sign the [document-processor CLA](CLA.md)
 ## Repo layout
 
 ```
-src/                — Svelte 5 frontend (App.svelte, app.css, main.js)
+src/                — Svelte 5 frontend (App.svelte, main.js, styles.css + app.css)
 src-tauri/          — Rust backend
   src/main.rs       — Tauri commands + AppState wiring
   src/parser.rs     — PDF/DOCX/TXT parsing + image context extraction
-  src/db.rs         — SQLite persistence (rusqlite, bundled)
-  src/watcher.rs    — Filesystem watcher for the watch-folder feature
+  src/db.rs         — SQLite persistence (rusqlite, bundled) + hybrid search queries
+  src/search.rs     — Hybrid FTS5 + embedding search (local Ollama, circuit breaker)
   tauri.conf.json   — Window/bundle/CSP config
+  capabilities/default.json — Tauri 2 capability grants for the main window
   Cargo.toml        — Rust deps (pinned)
   Cargo.lock        — tracked (desktop app, deterministic builds)
 package.json        — Vite + Svelte + @tauri-apps/* deps
@@ -53,7 +54,7 @@ Welcomed:
 
 - **Parsers for new formats** — propose in an issue first so we can pick the right crate (DOC/RTF/ODT all have several options with different tradeoffs).
 - **Image-context improvements** — better OCR, smarter neighbour-text capture.
-- **Watch-folder behaviour** — debouncing, batching, recursion controls.
+- **Watch-folder behaviour** — today the "watch folder" is only a remembered path that the user re-scans manually (`scan_folder` / `scan_folder_force` in `src/main.rs`); a real filesystem watcher (with debouncing, batching, recursion controls) would be a new feature — propose it in an issue first.
 - **UI fixes** — accessibility, keyboard navigation, dark/light theming.
 - **Tests** — Rust unit tests in `src-tauri/src/parser.rs` (see the existing test module), or end-to-end harnesses driving Tauri commands.
 
@@ -80,7 +81,7 @@ npm audit --audit-level=high
 cargo audit            # cargo install cargo-audit once
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same set — keep them green locally to avoid round-trips.
+CI (`.github/workflows/ci.yml`) currently runs a **subset** of this: the Rust build + tests (with the frontend built first, since Tauri's build script needs `dist/`) and the frontend build + `npm audit`. `cargo fmt`, `cargo clippy` and `cargo audit` are **not** enforced in CI yet (see the comment in `ci.yml` — pending a dedicated style-pass PR), so run them locally anyway to keep the tree ready for when they're flipped on.
 
 ## Style
 
@@ -90,7 +91,7 @@ CI (`.github/workflows/ci.yml`) runs the same set — keep them green locally to
 
 ## Polish ↔ English
 
-This repo predates the open-sourcing and carries a few Polish identifiers (`uruchom.sh`, the `dane/` and `przetworzone/` directories created by `main.rs` / `parser.rs`). New contributions should be English-first; if you rename one of the legacy Polish identifiers, do it as a standalone refactor PR (not bundled with a feature change) so the diff is easy to review.
+This repo predates the open-sourcing and carries a few Polish identifiers (`uruchom.sh`, and the `przetworzone/` and `download/` directories that `parser.rs` creates under the app data dir; `dane/` survives only as a `.gitignore` entry — nothing creates it anymore). New contributions should be English-first; if you rename one of the legacy Polish identifiers, do it as a standalone refactor PR (not bundled with a feature change) so the diff is easy to review.
 
 ## Reporting bugs / security issues
 

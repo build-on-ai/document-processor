@@ -1,16 +1,17 @@
 # Document Processor
 
-A modern desktop application for parsing and processing documents (PDF, DOCX, TXT) with intelligent image context extraction.
+A modern desktop application for parsing and processing documents (PDF, DOCX, TXT) with image extraction and approximate text context.
 
 Built with **Rust + Tauri + Svelte** for maximum performance and minimal footprint.
 
 ## Features
 
 - **Multi-format parsing**: PDF, DOCX, TXT (`.doc` files are accepted but routed through the DOCX parser — pure legacy `.doc` binary support is not implemented; RTF is not supported)
-- **Image extraction with context**: Images are extracted with surrounding text preserved
+- **Image extraction with approximate context**: Images are extracted together with nearby text, estimated from the image's order in the document — see [Image Context](#image-context) for exactly what is and isn't captured
 - **Document classification**: Automatic detection of document types (umowa, pozew, ustawa, etc.)
 - **Watch folder**: remembers a target folder for manual re-scan — new files are **not** picked up automatically; you re-run the scan yourself
 - **SQLite database**: Fast search and organization
+- **Hybrid search**: SQLite FTS5 lexical search, optionally fused with embeddings from a local Ollama instance; degrades to lexical-only when Ollama isn't running — see [Search](#search)
 - **Modern UI**: Dark theme, responsive design
 - **Linux desktop**: built and distributed for Linux (deb / AppImage); the Tauri toolchain compiles on Windows + macOS but no installers are produced by the default bundle config — adding `nsis` / `dmg` targets to `tauri.conf.json` is welcomed via a PR
 
@@ -85,11 +86,15 @@ on Linux, i.e. `~/.local/share/com.buildonai.document-processor` unless
     ├── document.md                    # Human-readable markdown
     ├── document.json                  # Structured data for AI
     ├── images/
-    │   ├── img_001.png                # Extracted images
-    │   ├── img_001.json               # Image metadata + context
-    │   └── thumb_001.png              # Thumbnails
+    │   ├── img_001.png                # Extracted images (PDF: img_NNN.png;
+    │   │                              #   DOCX: original names from word/media/)
+    │   └── thumb_img_001.png          # Thumbnails: thumb_<image filename>
     └── original.<ext>                 # Original file copy
 ```
+
+There is no per-image metadata file on disk — image metadata (context,
+position marker, dimensions, paths) lives in `document.json` and in the
+`images` table of `documents.db`.
 
 This resolves the same way whether you're running `cargo tauri dev` or
 a packaged `.deb`/AppImage install — it does not depend on where the
@@ -98,11 +103,39 @@ executable lives. `przetworzone/` is a Polish legacy identifier
 
 ### Image Context
 
-Each image includes:
-- `context_before`: 200 characters of text before the image
-- `context_after`: 200 characters after
-- `position_marker`: Page and position reference
+Image context is **approximate**: the position of each image in the text
+is *estimated from the image's order in the document* (PDF: object
+iteration order; DOCX: order within `word/media/`) — it is **not**
+derived from the image's real layout position (see
+`src-tauri/src/parser.rs`). Each image record includes:
+
+- `context_before`: up to 200 characters of text before the estimated position
+- `context_after`: up to 200 characters after the estimated position — **PDF only**; for DOCX it is always `None`
+- `page`: **not tracked** — always `None`
+- `position_marker`: an ordering marker (`obj_<n>` for PDF objects, `media_<n>` for DOCX media entries), not a page/position reference
 - `ocr_text`, `ai_description`: reserved columns for a future OCR / AI-description pass — **not implemented**, always empty today. Kept in the schema so a later migration doesn't have to add them; don't build against them expecting real values.
+
+## Search
+
+The app has an instant, as-you-type search box: results appear in a
+dropdown while you type (debounced), arrow keys + Enter navigate and
+open a hit, and opening a result jumps to the matching fragment of the
+document (`src/App.svelte`). Under the hood
+(`src-tauri/src/search.rs`, `db.rs::search_hybrid`):
+
+- **Lexical**: SQLite FTS5 over ~1000-character text chunks, ranked by
+  `bm25()`, with exact-fragment highlighting.
+- **Semantic (optional)**: cosine similarity over chunk embeddings from
+  a **local Ollama** instance — `POST http://localhost:11434/api/embed`,
+  model `nomic-embed-text` (768-dim). The lexical and semantic ranked
+  lists are fused via reciprocal rank fusion (RRF).
+- **Fail-open**: if Ollama is unreachable or the model isn't pulled, a
+  circuit breaker (3 consecutive failures → 60 s cooldown) skips
+  embedding calls and search degrades to lexical-only. A document that
+  can't be embedded still imports successfully — it's indexed for
+  lexical search either way.
+- **Local only**: the embedding requests to `localhost:11434` are the
+  only network traffic the app generates. No cloud calls.
 
 ## Integrations
 
@@ -129,13 +162,14 @@ document-processor/
 ├── src/                  # Svelte frontend
 │   ├── App.svelte       # Main component
 │   ├── main.js          # Entry point
-│   └── styles.css       # Global styles
+│   ├── styles.css       # Global styles (imported by main.js)
+│   └── app.css          # Component styles (imported by App.svelte)
 ├── src-tauri/
 │   └── src/
 │       ├── main.rs      # Tauri entry point
 │       ├── parser.rs    # Document parsing logic
 │       ├── db.rs        # SQLite database
-│       └── watcher.rs   # Folder watching
+│       └── search.rs    # Hybrid FTS5 + embedding search
 └── package.json
 ```
 

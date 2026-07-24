@@ -8,7 +8,7 @@ Categories tested:
 2. Bulk Operations (ZIP, CSV with URLs, folder upload)
 3. External Sources (cloud storage, URL import, API)
 4. Communication Channels (email, FTP, WebDAV)
-5. Automated (cron/watch folder, OCR)
+5. Automated (watch-folder re-scan — manual in this app; OCR placeholder)
 6. Programmatic (REST API, CLI)
 7. Administrative (filesystem copy, database import)
 """
@@ -363,20 +363,20 @@ Test folder: {self.test_dir / 'input'}
         print("CATEGORY 5: AUTOMATED")
         print("=" * 70)
 
-        # 5.1 Watch folder
+        # 5.1 Watch folder (manual re-scan — the app has no filesystem watcher)
         self.results.append(TestResult(
             category="5_automated",
             test_name="watch_folder",
-            description="Auto-process files added to watch folder",
+            description="Re-scan processes files added to the watch folder (manual re-scan, no automatic watching)",
             status="MANUAL",
             priority="HIGH",
             instructions=f"""
 1. Set watch folder to: {self.test_dir / 'watch_folder'}
-2. Copy a PDF to that folder
-3. Document should be auto-processed
-
-Test command:
-cp {self.sample_files['pdf']} {self.test_dir / 'watch_folder'}/
+2. Copy a PDF to that folder:
+   cp {self.sample_files['pdf']} {self.test_dir / 'watch_folder'}/
+3. Trigger a re-scan in the app (files are NOT auto-processed)
+4. Output appears under the app data dir
+   (Linux: ~/.local/share/com.buildonai.document-processor/przetworzone/)
 """
         ))
 
@@ -387,7 +387,7 @@ cp {self.sample_files['pdf']} {self.test_dir / 'watch_folder'}/
             description="OCR text extraction from scanned images",
             status="MANUAL",
             priority="MEDIUM",
-            details="OCR is attempted on PDF images during processing"
+            details="OCR is not implemented — ocr_text is a reserved column, always empty today"
         ))
 
     # =========================================================================

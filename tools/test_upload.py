@@ -191,14 +191,14 @@ startxref
         })
 
     def test_watch_folder(self):
-        """Test watch folder functionality"""
+        """Test watch folder functionality (manual re-scan — the app does not auto-watch)"""
         print("\n=== Watch Folder Test ===")
 
         self.results.append({
-            "test": "watch_folder_auto_process",
-            "description": "Auto-process files added to watch folder",
+            "test": "watch_folder_rescan",
+            "description": "Re-scan picks up files added to the watch folder (scanning is manual, no automatic watching)",
             "status": "MANUAL",
-            "instructions": f"1. Set watch folder to: {self.watch_dir}\n2. Copy a PDF to that folder\n3. Check if it's auto-processed"
+            "instructions": f"1. Set watch folder to: {self.watch_dir}\n2. Copy a PDF to that folder\n3. Trigger a re-scan in the app (files are NOT picked up automatically)\n4. Check that output appears under the app data dir (Linux: ~/.local/share/com.buildonai.document-processor/przetworzone/)"
         })
 
     def generate_report(self):
