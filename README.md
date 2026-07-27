@@ -74,12 +74,16 @@ cd src-tauri && cargo test
 45 tests covering the database layer, the parsers and hybrid search
 (FTS5 + embeddings, reciprocal rank fusion, the Ollama circuit breaker).
 
-`npm run build` is not optional here. `tauri.conf.json` points
-`frontendDist` at `../dist`, and `tauri::generate_context!` resolves that
-path at compile time, so without a built frontend `cargo test` fails
-during compilation — `proc macro panicked: the frontendDist configuration
-is set to "../dist" but this path doesn't exist` — before a single test
-runs.
+`npm run build` is only needed when you invoke cargo directly.
+`tauri.conf.json` sets `beforeBuildCommand`, so `npm run tauri build`,
+`npm run tauri dev` and `./run.sh` all build the frontend for you — the UI
+is compiled into the binary, and a packaged install never asks the user
+for a build step.
+
+A bare `cargo test` skips that hook. `frontendDist` points at `../dist`
+and `tauri::generate_context!` resolves it at compile time, so on a fresh
+clone the run dies in the proc macro — `the frontendDist configuration is
+set to "../dist" but this path doesn't exist` — before a single test runs.
 
 ## Usage
 
