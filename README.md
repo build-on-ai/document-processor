@@ -63,6 +63,24 @@ npm run tauri build
 npm run tauri dev
 ```
 
+### Running the tests
+
+```bash
+npm install
+npm run build          # required first — see below
+cd src-tauri && cargo test
+```
+
+45 tests covering the database layer, the parsers and hybrid search
+(FTS5 + embeddings, reciprocal rank fusion, the Ollama circuit breaker).
+
+`npm run build` is not optional here. `tauri.conf.json` points
+`frontendDist` at `../dist`, and `tauri::generate_context!` resolves that
+path at compile time, so without a built frontend `cargo test` fails
+during compilation — `proc macro panicked: the frontendDist configuration
+is set to "../dist" but this path doesn't exist` — before a single test
+runs.
+
 ## Usage
 
 ### GUI Application
