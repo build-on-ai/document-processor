@@ -54,7 +54,7 @@ Welcomed:
 
 - **Parsers for new formats** — propose in an issue first so we can pick the right crate (DOC/RTF/ODT all have several options with different tradeoffs).
 - **Image-context improvements** — better OCR, smarter neighbour-text capture.
-- **Watch-folder behaviour** — today the "watch folder" is only a remembered path that the user re-scans manually (`scan_folder` / `scan_folder_force` in `src/main.rs`); a real filesystem watcher (with debouncing, batching, recursion controls) would be a new feature — propose it in an issue first.
+- **Watch-folder behaviour** — today the "watch folder" is a remembered path that the user re-scans manually (`scan_folder` / `scan_folder_force` in `src/main.rs`); a real filesystem watcher (with debouncing, batching, recursion controls) would be a new feature — propose it in an issue first.
 - **UI fixes** — accessibility, keyboard navigation, dark/light theming.
 - **Tests** — Rust unit tests in `src-tauri/src/parser.rs` (see the existing test module), or end-to-end harnesses driving Tauri commands.
 
