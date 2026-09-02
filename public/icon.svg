@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4f46e5"/>
+      <stop offset="100%" style="stop-color:#7c3aed"/>
+    </linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect width="128" height="128" rx="24" fill="url(#bg)"/>
+  <!-- Document -->
+  <path d="M35 20 L75 20 L93 38 L93 108 L35 108 Z" fill="white" opacity="0.95"/>
+  <!-- Folded corner -->
+  <path d="M75 20 L75 38 L93 38 Z" fill="#c7d2fe"/>
+  <!-- Text lines -->
+  <rect x="45" y="50" width="38" height="4" rx="1" fill="#4f46e5" opacity="0.6"/>
+  <rect x="45" y="60" width="30" height="4" rx="1" fill="#4f46e5" opacity="0.5"/>
+  <rect x="45" y="70" width="35" height="4" rx="1" fill="#4f46e5" opacity="0.5"/>
+  <rect x="45" y="80" width="25" height="4" rx="1" fill="#4f46e5" opacity="0.3"/>
+  <!-- AI Badge -->
+  <circle cx="98" cy="98" r="22" fill="#1e1b4b"/>
+  <text x="98" y="105" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#22c55e" text-anchor="middle">AI</text>
+</svg>

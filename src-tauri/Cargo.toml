@@ -1,0 +1,57 @@
+[package]
+name = "document-processor"
+version = "1.0.0"
+description = "Document Processor - Parse PDF/DOCX/TXT with image context extraction"
+authors = ["BuildOnAI"]
+edition = "2021"
+rust-version = "1.70"
+license = "AGPL-3.0-only"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# PDF parsing
+pdf-extract = "0.8"
+lopdf = "0.34"
+
+# Image processing
+image = "0.25"
+base64 = "0.22"
+
+# SQLite
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# UUID for document IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# DOCX parsing
+docx-rs = "0.4"
+zip = "2"
+
+# Encoding detection
+encoding_rs = "0.8"
+
+# HTTP client for the local Ollama embeddings endpoint (search.rs).
+# default-features off: we only ever call http://localhost, no TLS backend needed.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

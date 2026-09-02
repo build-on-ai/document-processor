@@ -1,0 +1,30 @@
+# document-processor CODEOWNERS
+# Default — any change needs a maintainer look.
+*                           @tmaloziec
+
+# Rust backend (Tauri commands + file-system + parsing).
+/src-tauri/                 @tmaloziec
+
+# Svelte frontend.
+/src/                       @tmaloziec
+
+# Build + CI.
+/.github/                   @tmaloziec
+/CODEOWNERS                 @tmaloziec
+/package.json               @tmaloziec
+/package-lock.json          @tmaloziec
+/vite.config.js             @tmaloziec
+/svelte.config.js           @tmaloziec
+/postcss.config.js          @tmaloziec
+
+# Shell entrypoints.
+/run.sh                     @tmaloziec
+/uruchom.sh                 @tmaloziec
+
+# Commercial licensing surface.
+/LICENSE                    @tmaloziec
+/LICENSE-COMMERCIAL.md      @tmaloziec
+/CLA.md                     @tmaloziec
+/CONTRIBUTING.md            @tmaloziec
+/COPYRIGHT                  @tmaloziec
+/SECURITY.md                @tmaloziec
