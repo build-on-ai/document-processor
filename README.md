@@ -19,6 +19,10 @@ Built with **Rust + Tauri + Svelte** for maximum performance and minimal footpri
 
 ### Prerequisites
 
+You need Node.js 18+ with npm, a Rust toolchain with `cargo`, and the Tauri
+system libraries below. `bin/preflight` checks all of them and prints a fix for
+every missing requirement.
+
 #### Linux (Ubuntu/Debian)
 ```bash
 sudo apt install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
@@ -48,13 +52,19 @@ Prerequisites if you want to try:
 ### Build from source
 
 ```bash
-# Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Clone and build
+# Clone the application.
+git clone https://github.com/build-on-ai/document-processor.git
 cd document-processor
-npm install
-npm run tauri build
+
+# Install Node.js 18+ with npm from https://nodejs.org, then install Rust.
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+# Confirm every host dependency before building. It changes nothing.
+bin/preflight
+
+# Installs npm dependencies when absent and creates the Linux bundle.
+./run.sh build
 ```
 
 ### Development
